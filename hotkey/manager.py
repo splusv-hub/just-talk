@@ -23,6 +23,7 @@ class HotkeyManager(QObject):
     start_recording_requested = pyqtSignal(str)  # 参数：mode ("hold" 或 "toggle")
     stop_recording_requested = pyqtSignal()
     snippet_triggered = pyqtSignal(str, str)  # (snippet_id, text)
+    translation_toggle_requested = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -109,6 +110,9 @@ class HotkeyManager(QObject):
     def _on_hotkey_event(self, hotkey_id: str, action: str) -> None:
         """处理快捷键事件"""
         if not self._enabled or self._suspended:
+            return
+        if hotkey_id == "translation_toggle" and action == "toggle":
+            self.translation_toggle_requested.emit()
             return
         if action == "press":
             # 按住模式 - 开始录音

@@ -150,6 +150,42 @@ class LoadingDotsWidget(QtWidgets.QWidget):
             x += self._dot_diameter + self._gap
 
 
+class SpinnerWidget(QtWidgets.QWidget):
+    """旋转圆环加载动画"""
+
+    def __init__(self, size: int = 16, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._size = size
+        self._angle = 0
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._advance)
+        self._timer.start()
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + 20) % 360
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+        rect = QtCore.QRectF(2, 2, self._size - 4, self._size - 4)
+        base_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 50), 2.2)
+        base_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(base_pen)
+        painter.drawEllipse(rect)
+
+        active_pen = QtGui.QPen(QtGui.QColor(255, 255, 255), 2.2)
+        active_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(active_pen)
+        painter.drawArc(rect, int((-self._angle) * 16), int(120 * 16))
+
+
 class RoundIconButton(QtWidgets.QPushButton):
     """圆形图标按钮（匹配示例HTML的 32px 圆按钮与按下缩放）"""
 
@@ -207,6 +243,86 @@ class CapsuleWidget(QtWidgets.QWidget):
         painter.drawRoundedRect(rect, corner_radius, corner_radius)
 
 
+class StatusToast(QtWidgets.QWidget):
+    """短时状态提示窗口"""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._shadow_blur = 15
+        self._shadow_offset_y = 4
+        self._shadow_pad = self._shadow_blur + abs(self._shadow_offset_y)
+        self._pending_position: Optional[QtCore.QPoint] = None
+        self._setup_window()
+        self._build_ui()
+
+    def _setup_window(self) -> None:
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        flags |= Qt.WindowType.Tool
+        flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+        if sys.platform == "darwin":
+            flags &= ~Qt.WindowType.Tool
+            flags |= Qt.WindowType.ToolTip
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_X11DoNotAcceptFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAutoFillBackground(False)
+
+    def _build_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(self._shadow_pad, self._shadow_pad, self._shadow_pad, self._shadow_pad)
+        root.setSpacing(0)
+
+        capsule = CapsuleWidget()
+        capsule.setObjectName("statusToastCapsule")
+        capsule.setMinimumHeight(44)
+        capsule_layout = QtWidgets.QHBoxLayout(capsule)
+        capsule_layout.setContentsMargins(18, 10, 18, 10)
+        capsule_layout.setSpacing(10)
+
+        self._dot = QtWidgets.QLabel()
+        self._dot.setFixedSize(10, 10)
+        self._dot.setStyleSheet("background:#10b981; border-radius:5px;")
+        capsule_layout.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._label = QtWidgets.QLabel()
+        self._label.setStyleSheet("color: white; font-size: 14px; font-weight: 600;")
+        capsule_layout.addWidget(self._label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        root.addWidget(capsule)
+        self._capsule = capsule
+
+    def show_message(self, text: str, accent: str = "#10b981") -> None:
+        self._label.setText(text)
+        self._label.adjustSize()
+        self._dot.setStyleSheet(f"background:{accent}; border-radius:5px;")
+        self._capsule.adjustSize()
+        self.adjustSize()
+        self._position_with_move()
+        self.show()
+        self.raise_()
+
+    def _position_with_move(self) -> None:
+        screen = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return
+        screen_geometry = screen.availableGeometry()
+        bubble_w = self.width()
+        bubble_h = self.height()
+        x = screen_geometry.x() + (screen_geometry.width() - bubble_w) // 2
+        y = screen_geometry.y() + screen_geometry.height() - bubble_h - 150
+        self._pending_position = QtCore.QPoint(x, y)
+        self.move(self._pending_position)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._pending_position is not None:
+            self.move(self._pending_position)
+
+
 class RecordingIndicator(QtWidgets.QWidget):
     """录音指示器窗口 - 参考闪电说设计"""
 
@@ -215,7 +331,7 @@ class RecordingIndicator(QtWidgets.QWidget):
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self._mode = "hold"  # hold, toggle, processing, connecting
+        self._mode = "hold"  # hold, toggle, processing, connecting, translating
         self._shadow_blur = 15
         self._shadow_offset_y = 4
         self._shadow_pad = self._shadow_blur + abs(self._shadow_offset_y)
@@ -380,10 +496,12 @@ class RecordingIndicator(QtWidgets.QWidget):
         self._page_toggle = QtWidgets.QWidget()
         self._page_processing = QtWidgets.QWidget()
         self._page_connecting = QtWidgets.QWidget()
+        self._page_translating = QtWidgets.QWidget()
         capsule_layout.addWidget(self._page_hold)
         capsule_layout.addWidget(self._page_toggle)
         capsule_layout.addWidget(self._page_processing)
         capsule_layout.addWidget(self._page_connecting)
+        capsule_layout.addWidget(self._page_translating)
         self._capsule_stack = capsule_layout
 
         # 波浪动画（hold模式 11条，toggle模式 15条）
@@ -416,6 +534,17 @@ class RecordingIndicator(QtWidgets.QWidget):
         connecting_layout.addWidget(self.connecting_dots, 0, Qt.AlignmentFlag.AlignCenter)
         connecting_layout.addStretch(1)
 
+        self.translating_spinner = SpinnerWidget(size=16)
+        self.translating_label = QtWidgets.QLabel("翻译中")
+        self.translating_label.setStyleSheet("color: white; font-size: 14px; font-weight: 600;")
+        translating_layout = QtWidgets.QHBoxLayout(self._page_translating)
+        translating_layout.setContentsMargins(0, 0, 0, 0)
+        translating_layout.setSpacing(10)
+        translating_layout.addStretch(1)
+        translating_layout.addWidget(self.translating_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        translating_layout.addWidget(self.translating_spinner, 0, Qt.AlignmentFlag.AlignVCenter)
+        translating_layout.addStretch(1)
+
         # Toggle（自由录音）：左右按钮 + 中间波形，左右各 10px padding，space-between
         self.cancel_btn = RoundIconButton("✕", "#eb4d3d")
         self.cancel_btn.clicked.connect(self.cancel_clicked.emit)
@@ -447,6 +576,10 @@ class RecordingIndicator(QtWidgets.QWidget):
             self._capsule_stack.setCurrentWidget(self._page_connecting)
             capsule_w, capsule_h = 120, 50
 
+        elif self._mode == "translating":
+            self._capsule_stack.setCurrentWidget(self._page_translating)
+            capsule_w, capsule_h = 152, 50
+
         else:  # toggle
             self._capsule_stack.setCurrentWidget(self._page_toggle)
             capsule_w, capsule_h = 220, 50
@@ -456,7 +589,7 @@ class RecordingIndicator(QtWidgets.QWidget):
         self._update_layer_shell_geometry()
 
     def set_mode(self, mode: str) -> None:
-        """设置模式: 'hold', 'toggle', 'processing', 'connecting'"""
+        """设置模式: 'hold', 'toggle', 'processing', 'connecting', 'translating'"""
         self._mode = mode
         self._update_ui()
 
@@ -743,6 +876,10 @@ class RecordingIndicatorManager(QtCore.QObject):
     def __init__(self, parent: Optional[QtCore.QObject] = None) -> None:
         super().__init__(parent)
         self._indicator: Optional[RecordingIndicator] = None
+        self._toast: Optional[StatusToast] = None
+        self._toast_timer = QtCore.QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._hide_toast)
 
     def show_hold_mode(self) -> None:
         """显示按住模式指示器"""
@@ -784,10 +921,31 @@ class RecordingIndicatorManager(QtCore.QObject):
         self._indicator.set_mode("connecting")
         self._indicator.show_at_bottom_center()
 
+    def show_translating(self) -> None:
+        """显示翻译中状态"""
+        if self._indicator is None:
+            self._indicator = RecordingIndicator()
+            self._indicator.cancel_clicked.connect(self.cancel_requested.emit)
+            self._indicator.confirm_clicked.connect(self.confirm_requested.emit)
+
+        self._indicator.set_mode("translating")
+        self._indicator.show_at_bottom_center()
+
     def hide(self) -> None:
         """隐藏指示器"""
         if self._indicator:
             self._indicator.hide()
+
+    def show_status_toast(self, text: str, accent: str = "#10b981", duration_ms: int = 1200) -> None:
+        """显示短时状态提示"""
+        if self._toast is None:
+            self._toast = StatusToast()
+        self._toast.show_message(text, accent=accent)
+        self._toast_timer.start(max(300, duration_ms))
+
+    def _hide_toast(self) -> None:
+        if self._toast:
+            self._toast.hide()
 
     def cleanup(self) -> None:
         """清理资源"""
@@ -795,3 +953,7 @@ class RecordingIndicatorManager(QtCore.QObject):
             self._indicator.close()
             self._indicator.deleteLater()
             self._indicator = None
+        if self._toast:
+            self._toast.close()
+            self._toast.deleteLater()
+            self._toast = None

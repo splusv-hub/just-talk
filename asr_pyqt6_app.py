@@ -19,6 +19,8 @@ import uuid
 from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 def _resolve_log_path() -> str:
@@ -1324,6 +1326,17 @@ class AsrController(QtCore.QObject):
     appIdChanged = QtCore.pyqtSignal()
     accessTokenChanged = QtCore.pyqtSignal()
     useGzipChanged = QtCore.pyqtSignal()
+    recognitionLanguageChanged = QtCore.pyqtSignal()
+    translationEnabledChanged = QtCore.pyqtSignal()
+    translationBaseUrlChanged = QtCore.pyqtSignal()
+    translationApiKeyChanged = QtCore.pyqtSignal()
+    translationModelChanged = QtCore.pyqtSignal()
+    translationPromptChanged = QtCore.pyqtSignal()
+    translationSourceLanguageChanged = QtCore.pyqtSignal()
+    translationTargetLanguageChanged = QtCore.pyqtSignal()
+    translationModelsChanged = QtCore.pyqtSignal()
+    translationModelsLoadingChanged = QtCore.pyqtSignal()
+    translationModelsStatusChanged = QtCore.pyqtSignal()
     startMinimizedChanged = QtCore.pyqtSignal()
     autoSubmitChanged = QtCore.pyqtSignal()
     autoSubmitModeChanged = QtCore.pyqtSignal()
@@ -1341,6 +1354,8 @@ class AsrController(QtCore.QObject):
     freehandHotkeyTextChanged = QtCore.pyqtSignal()
     freehandHotkeyModeChanged = QtCore.pyqtSignal()
     freehandHotkeyEnabledChanged = QtCore.pyqtSignal()
+    translationToggleHotkeyTextChanged = QtCore.pyqtSignal()
+    translationToggleHotkeyEnabledChanged = QtCore.pyqtSignal()
     mouseHotkeyModeChanged = QtCore.pyqtSignal()
     tutorialHoldTextChanged = QtCore.pyqtSignal()
     tutorialToggleTextChanged = QtCore.pyqtSignal()
@@ -1356,6 +1371,8 @@ class AsrController(QtCore.QObject):
     historyRowRemoved = QtCore.pyqtSignal(int)
     macPermissionsChanged = QtCore.pyqtSignal()
     kdePermissionsChanged = QtCore.pyqtSignal()
+    translationCompleted = QtCore.pyqtSignal(int, str, str, bool, str)
+    translationModelsFetched = QtCore.pyqtSignal(str, str)
 
     RESOURCE_ID_DEFAULT = "volc.seedasr.sauc.duration"
     CHUNK_MS_DEFAULT = 200
@@ -1373,6 +1390,8 @@ class AsrController(QtCore.QObject):
         self.ws.error.connect(self._on_ws_error)
         self.ws.binaryMessageReceived.connect(self._on_ws_binary)
         self.ws.start()
+        self.translationCompleted.connect(self._on_translation_completed)
+        self.translationModelsFetched.connect(self._on_translation_models_fetched)
 
         self._connected = False
         self._connecting = False
@@ -1423,6 +1442,18 @@ class AsrController(QtCore.QObject):
         self._mode = "nostream"
         self._app_id = self.DEFAULT_APP_ID
         self._access_token = self.DEFAULT_ACCESS_TOKEN
+        self._recognition_language = "zh-CN"
+        self._translation_enabled = False
+        self._translation_base_url = ""
+        self._translation_api_key = ""
+        self._translation_model = ""
+        self._translation_prompt = ""
+        self._translation_source_language = "自动检测"
+        self._translation_target_language = "英文"
+        self._translation_models: List[Dict[str, str]] = []
+        self._translation_models_loading = False
+        self._translation_models_status = "未获取模型列表"
+        self._translation_pending_count = 0
         self._start_minimized = False
         self._auto_submit = False
         self._auto_submit_mode = "paste"
@@ -1451,6 +1482,8 @@ class AsrController(QtCore.QObject):
         self._freehand_hotkey_text = ""
         self._freehand_hotkey_mode = "toggle"
         self._freehand_hotkey_enabled = True
+        self._translation_toggle_hotkey_text = ""
+        self._translation_toggle_hotkey_enabled = False
         self._mouse_hotkey_mode = "hold"
         self._tutorial_hold_text = ""
         self._tutorial_toggle_text = ""
@@ -1510,6 +1543,7 @@ class AsrController(QtCore.QObject):
             self.hotkey_manager.start_recording_requested.connect(self._on_hotkey_start_recording)
             self.hotkey_manager.stop_recording_requested.connect(self.stop_recognition)
             self.hotkey_manager.snippet_triggered.connect(self._on_snippet_triggered)
+            self.hotkey_manager.translation_toggle_requested.connect(self.toggleTranslationEnabledByHotkey)
             self.hotkey_manager.error_occurred.connect(self._on_hotkey_error)
 
             config = ConfigManager.load_config()
@@ -1535,6 +1569,177 @@ class AsrController(QtCore.QObject):
             self._check_kde_permissions_impl()
         self._update_status_text()
         self._update_stats()
+
+    def _translation_default_prompt(self) -> str:
+        source = (self._translation_source_language or "").strip() or "自动检测"
+        target = (self._translation_target_language or "").strip() or "英文"
+        if source.lower() in {"automatic detection", "auto detection", "auto-detect", "autodetect"}:
+            source = "自动检测"
+        if source == "自动检测":
+            return (
+                "你是一个专业翻译助手。"
+                f"请自动识别用户输入的源语言，并翻译为{target}。"
+                "保持原意准确、表达自然。"
+                "你的输出必须是 JSON 对象，且只包含一个键 translation。"
+                "不要输出 markdown、代码块、解释、前缀、注释、语言名称或其他任何字段。"
+            )
+        return (
+            "你是一个专业翻译助手。"
+            f"请将用户提供的文本从{source}翻译为{target}。"
+            "保持原意准确、表达自然。"
+            "你的输出必须是 JSON 对象，且只包含一个键 translation。"
+            "不要输出 markdown、代码块、解释、前缀、注释、语言名称或其他任何字段。"
+        )
+
+    def _translation_effective_prompt(self) -> str:
+        custom_prompt = (self._translation_prompt or "").strip()
+        if custom_prompt:
+            return custom_prompt
+        return self._translation_default_prompt()
+
+    def _openai_compatible_endpoint(self, path: str) -> str:
+        base_url = (self._translation_base_url or "").strip().rstrip("/")
+        if not base_url:
+            raise ValueError("未配置翻译 Base URL")
+        suffix = path if path.startswith("/") else f"/{path}"
+        if base_url.endswith("/v1"):
+            return f"{base_url}{suffix}"
+        return f"{base_url}/v1{suffix}"
+
+    def _openai_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[dict] = None,
+        timeout: float = 15.0,
+    ) -> dict:
+        api_key = (self._translation_api_key or "").strip()
+        if not api_key:
+            raise ValueError("未配置翻译 API Key")
+        url = self._openai_compatible_endpoint(path)
+        data: Optional[bytes] = None
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        }
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib_request.Request(url, data=data, headers=headers, method=method.upper())
+        try:
+            with urllib_request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {body or exc.reason}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"网络请求失败: {exc.reason}") from exc
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"响应不是合法 JSON: {raw[:200]}") from exc
+
+    def _translate_via_openai_compatible(self, text: str) -> str:
+        source_language = (self._translation_source_language or "").strip() or "自动检测"
+        target_language = (self._translation_target_language or "").strip() or "英文"
+        normalized_source = source_language.lower()
+        source_hint = ""
+        if normalized_source not in {"自动检测", "automatic detection", "auto detection", "auto-detect", "autodetect"}:
+            source_hint = f"源语言：{source_language}\n"
+
+        base_messages = [
+            {"role": "system", "content": self._translation_effective_prompt()},
+            {
+                "role": "user",
+                "content": (
+                    f"{source_hint}"
+                    f"目标语言：{target_language}\n"
+                    "请把下面文本翻译后放进 JSON 的 translation 字段。\n\n"
+                    f"{text}"
+                ),
+            },
+        ]
+
+        payload = {
+            "model": self._translation_model,
+            "temperature": 0.2,
+            "messages": base_messages,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = self._openai_request("POST", "/chat/completions", payload=payload, timeout=60.0)
+            return self._extract_translation_text(response)
+        except Exception as exc:
+            message = str(exc)
+            unsupported = any(
+                token in message.lower()
+                for token in ("response_format", "json_object", "unsupported", "not support", "unknown field")
+            )
+            if not unsupported:
+                raise
+
+        fallback_payload = {
+            "model": self._translation_model,
+            "temperature": 0.2,
+            "messages": base_messages,
+        }
+        response = self._openai_request("POST", "/chat/completions", payload=fallback_payload, timeout=60.0)
+        return self._extract_translation_text(response)
+
+    def _extract_translation_text(self, response: dict) -> str:
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("翻译响应缺少 choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("翻译响应缺少 message")
+        content = message.get("content")
+        if isinstance(content, str):
+            return self._parse_translation_response_text(content)
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            joined = "".join(parts).strip()
+            if joined:
+                return self._parse_translation_response_text(joined)
+        raise RuntimeError("翻译响应缺少文本内容")
+
+    def _parse_translation_response_text(self, content: str) -> str:
+        text = (content or "").strip()
+        if not text:
+            raise RuntimeError("翻译响应为空")
+
+        candidates = [text]
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S)
+        if fenced_match:
+            candidates.insert(0, fenced_match.group(1).strip())
+        brace_match = re.search(r"\{.*\}", text, flags=re.S)
+        if brace_match:
+            candidates.insert(0, brace_match.group(0).strip())
+
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                value = obj.get("translation")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        cleaned = text
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = re.sub(r'^\s*"translation"\s*:\s*', "", cleaned, flags=re.I)
+        cleaned = re.sub(r"^\s*(translation|译文|翻译结果)\s*[:：]\s*", "", cleaned, flags=re.I)
+        cleaned = cleaned.strip().strip('"').strip()
+        if cleaned:
+            return cleaned
+        raise RuntimeError("无法解析翻译结果")
 
     # ── macOS 权限检测 ────────────────────────────────────────────
 
@@ -1767,6 +1972,117 @@ class AsrController(QtCore.QObject):
             self.useGzipChanged.emit()
             self._save_connection_config()
 
+    @QtCore.pyqtProperty(str, notify=recognitionLanguageChanged)
+    def recognitionLanguage(self) -> str:  # noqa: N802
+        return self._recognition_language
+
+    @recognitionLanguage.setter
+    def recognitionLanguage(self, value: str) -> None:
+        value = (value or "").strip() or "zh-CN"
+        if value != self._recognition_language:
+            self._recognition_language = value
+            self.recognitionLanguageChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(bool, notify=translationEnabledChanged)
+    def translationEnabled(self) -> bool:  # noqa: N802
+        return self._translation_enabled
+
+    @translationEnabled.setter
+    def translationEnabled(self, value: bool) -> None:
+        value = bool(value)
+        if value != self._translation_enabled:
+            self._translation_enabled = value
+            self.translationEnabledChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationBaseUrlChanged)
+    def translationBaseUrl(self) -> str:  # noqa: N802
+        return self._translation_base_url
+
+    @translationBaseUrl.setter
+    def translationBaseUrl(self, value: str) -> None:
+        value = (value or "").strip()
+        if value != self._translation_base_url:
+            self._translation_base_url = value
+            self.translationBaseUrlChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationApiKeyChanged)
+    def translationApiKey(self) -> str:  # noqa: N802
+        return self._translation_api_key
+
+    @translationApiKey.setter
+    def translationApiKey(self, value: str) -> None:
+        value = (value or "").strip()
+        if value != self._translation_api_key:
+            self._translation_api_key = value
+            self.translationApiKeyChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationModelChanged)
+    def translationModel(self) -> str:  # noqa: N802
+        return self._translation_model
+
+    @translationModel.setter
+    def translationModel(self, value: str) -> None:
+        value = (value or "").strip()
+        if value != self._translation_model:
+            self._translation_model = value
+            self.translationModelChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationPromptChanged)
+    def translationPrompt(self) -> str:  # noqa: N802
+        return self._translation_prompt
+
+    @translationPrompt.setter
+    def translationPrompt(self, value: str) -> None:
+        value = value or ""
+        if value != self._translation_prompt:
+            self._translation_prompt = value
+            self.translationPromptChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationSourceLanguageChanged)
+    def translationSourceLanguage(self) -> str:  # noqa: N802
+        return self._translation_source_language
+
+    @translationSourceLanguage.setter
+    def translationSourceLanguage(self, value: str) -> None:
+        value = "自动检测"
+        if value != self._translation_source_language:
+            self._translation_source_language = value
+            self.translationSourceLanguageChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationTargetLanguageChanged)
+    def translationTargetLanguage(self) -> str:  # noqa: N802
+        return self._translation_target_language
+
+    @translationTargetLanguage.setter
+    def translationTargetLanguage(self, value: str) -> None:
+        allowed = {"英文", "中文", "日文", "韩文", "法文", "德文", "西班牙文", "葡萄牙文", "阿拉伯文", "泰文"}
+        value = (value or "").strip() or "英文"
+        if value not in allowed:
+            value = "英文"
+        if value != self._translation_target_language:
+            self._translation_target_language = value
+            self.translationTargetLanguageChanged.emit()
+            self._save_connection_config()
+
+    @QtCore.pyqtProperty(str, notify=translationModelsChanged)
+    def translationModelsJson(self) -> str:  # noqa: N802
+        return json.dumps(self._translation_models, ensure_ascii=False)
+
+    @QtCore.pyqtProperty(bool, notify=translationModelsLoadingChanged)
+    def translationModelsLoading(self) -> bool:  # noqa: N802
+        return self._translation_models_loading
+
+    @QtCore.pyqtProperty(str, notify=translationModelsStatusChanged)
+    def translationModelsStatus(self) -> str:  # noqa: N802
+        return self._translation_models_status
+
     @QtCore.pyqtProperty(bool, notify=autoSubmitChanged)
     def autoSubmit(self) -> bool:  # noqa: N802
         return self._auto_submit
@@ -1946,6 +2262,23 @@ class AsrController(QtCore.QObject):
     def freehandHotkeyEnabled(self, value: bool) -> None:
         self._update_keyboard_hotkey("freehand", enabled=bool(value))
 
+    @QtCore.pyqtProperty(str, notify=translationToggleHotkeyTextChanged)
+    def translationToggleHotkeyText(self) -> str:  # noqa: N802
+        return self._translation_toggle_hotkey_text
+
+    @translationToggleHotkeyText.setter
+    def translationToggleHotkeyText(self, value: str) -> None:
+        keys = self._parse_keys_text(value)
+        self._update_keyboard_hotkey("translation_toggle", keys=keys)
+
+    @QtCore.pyqtProperty(bool, notify=translationToggleHotkeyEnabledChanged)
+    def translationToggleHotkeyEnabled(self) -> bool:  # noqa: N802
+        return self._translation_toggle_hotkey_enabled
+
+    @translationToggleHotkeyEnabled.setter
+    def translationToggleHotkeyEnabled(self, value: bool) -> None:
+        self._update_keyboard_hotkey("translation_toggle", enabled=bool(value))
+
     @QtCore.pyqtProperty(str, notify=mouseHotkeyModeChanged)
     def mouseHotkeyMode(self) -> str:  # noqa: N802
         return self._mouse_hotkey_mode
@@ -2011,7 +2344,7 @@ class AsrController(QtCore.QObject):
 
     @QtCore.pyqtSlot(str)
     def startHotkeyCapture(self, target: str) -> None:
-        if target not in ("primary", "freehand"):
+        if target not in ("primary", "freehand", "translation_toggle"):
             return
         if self._capture_target:
             self._capture_target = None
@@ -2220,6 +2553,163 @@ class AsrController(QtCore.QObject):
         self._update_stats()
 
     @QtCore.pyqtSlot()
+    def toggleTranslationEnabledByHotkey(self) -> None:  # noqa: N802
+        self.translationEnabled = not self._translation_enabled
+        if self.recording_indicator:
+            self.recording_indicator.show_status_toast(
+                "翻译已开启" if self._translation_enabled else "翻译已关闭",
+                accent="#10b981" if self._translation_enabled else "#f59e0b",
+                duration_ms=1400,
+            )
+
+    def _set_translation_models_loading(self, loading: bool) -> None:
+        loading = bool(loading)
+        if loading != self._translation_models_loading:
+            self._translation_models_loading = loading
+            self.translationModelsLoadingChanged.emit()
+
+    def _set_translation_models_status(self, status: str) -> None:
+        status = status or ""
+        if status != self._translation_models_status:
+            self._translation_models_status = status
+            self.translationModelsStatusChanged.emit()
+
+    def _set_translation_models(self, models: List[Dict[str, str]]) -> None:
+        normalized = []
+        for item in models:
+            model_id = str(item.get("id", "")).strip()
+            if not model_id:
+                continue
+            normalized.append(
+                {
+                    "id": model_id,
+                    "owned_by": str(item.get("owned_by", "")).strip(),
+                }
+            )
+        self._translation_models = normalized
+        self.translationModelsChanged.emit()
+
+    @QtCore.pyqtSlot()
+    def refreshTranslationModels(self) -> None:  # noqa: N802
+        if self._translation_models_loading:
+            return
+
+        def worker() -> None:
+            try:
+                response = self._openai_request("GET", "/models", timeout=12.0)
+                data = response.get("data")
+                if not isinstance(data, list):
+                    raise RuntimeError("模型列表响应缺少 data")
+                models = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    model_id = item.get("id")
+                    if not isinstance(model_id, str) or not model_id.strip():
+                        continue
+                    models.append(
+                        {
+                            "id": model_id.strip(),
+                            "owned_by": str(item.get("owned_by", "")).strip(),
+                        }
+                    )
+                self.translationModelsFetched.emit(
+                    json.dumps(models, ensure_ascii=False),
+                    "",
+                )
+            except Exception as exc:
+                self.translationModelsFetched.emit("[]", str(exc))
+
+        self._set_translation_models_loading(True)
+        self._set_translation_models_status("正在获取模型列表...")
+        threading.Thread(target=worker, name="translation-models", daemon=True).start()
+
+    @QtCore.pyqtSlot(str, str)
+    def _on_translation_models_fetched(self, models_json: str, error: str) -> None:
+        if error:
+            self._set_translation_models_status(f"获取失败: {error}")
+            self._set_translation_models_loading(False)
+            return
+        try:
+            parsed = json.loads(models_json)
+        except Exception:
+            parsed = []
+        if not isinstance(parsed, list):
+            parsed = []
+        self._set_translation_models(parsed)
+        if parsed and (not self._translation_model or self._translation_model not in {str(item.get('id', '')).strip() for item in parsed if isinstance(item, dict)}):
+            self._translation_model = str(parsed[0].get("id", "")).strip()
+            self.translationModelChanged.emit()
+        self._set_translation_models_status("")
+        self._set_translation_models_loading(False)
+        self._save_connection_config()
+
+    def _should_translate_output(self) -> bool:
+        return (
+            self._translation_enabled
+            and bool((self._translation_base_url or "").strip())
+            and bool((self._translation_api_key or "").strip())
+            and bool((self._translation_model or "").strip())
+            and bool((self._translation_target_language or "").strip())
+        )
+
+    def _translation_in_progress(self) -> bool:
+        return self._translation_pending_count > 0
+
+    def _start_translation_task(self, row: int, text: str, should_auto_submit: bool) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        self._translation_pending_count += 1
+
+        def worker() -> None:
+            try:
+                translated = self._translate_via_openai_compatible(text)
+                if not translated:
+                    raise RuntimeError("翻译结果为空")
+                self.translationCompleted.emit(row, text, translated, should_auto_submit, "")
+            except Exception as exc:
+                self.translationCompleted.emit(row, text, "", should_auto_submit, str(exc))
+
+        threading.Thread(target=worker, name="translation-worker", daemon=True).start()
+
+    @QtCore.pyqtSlot(int, str, str, bool, str)
+    def _on_translation_completed(
+        self,
+        row: int,
+        source_text: str,
+        translated_text: str,
+        should_auto_submit: bool,
+        error: str,
+    ) -> None:
+        self._translation_pending_count = max(0, self._translation_pending_count - 1)
+        final_text = translated_text.strip() if translated_text else ""
+        if error or not final_text:
+            final_text = source_text.strip()
+            error_key = hashlib.sha1((error or "empty").encode("utf-8")).hexdigest()[:12]
+            self._show_message_box_once(
+                f"translation:error:{error_key}",
+                QtWidgets.QMessageBox.Icon.Warning,
+                "翻译失败",
+                error or "翻译结果为空，已回退为原文。",
+            )
+
+        if row >= 0 and self._history_model.item_at(row) is not None:
+            self._history_model.update_item(row, text=final_text, partial=False)
+            self._emit_history_row(row)
+
+        if error:
+            self._set_translation_models_status("翻译失败，已回退为原文")
+        else:
+            self._set_translation_models_status("翻译完成")
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(final_text)
+        if should_auto_submit and final_text:
+            self._auto_submit_text(final_text, immediate=False)
+        if not self._translation_in_progress() and not self._sending and not self._connecting:
+            self._hide_indicator()
+
+    @QtCore.pyqtSlot()
     def showHotkeySettings(self) -> None:
         if not self.hotkey_manager:
             self._show_message_box_once(
@@ -2345,6 +2835,8 @@ class AsrController(QtCore.QObject):
         if hk is None:
             if hotkey_id == "freehand":
                 hk = HotkeyConfig(enabled=True, keys=["alt", "super"], mode="toggle")
+            elif hotkey_id == "translation_toggle":
+                hk = HotkeyConfig(enabled=False, keys=["ctrl", "shift", "t"], mode="toggle")
             else:
                 hk = HotkeyConfig(enabled=True, keys=["ctrl", "super"], mode="hold")
             config.keyboard_hotkeys[hotkey_id] = hk
@@ -2380,6 +2872,7 @@ class AsrController(QtCore.QObject):
     def _sync_hotkey_config(self, config) -> None:
         primary = getattr(config, "keyboard_hotkeys", {}).get("primary") if config else None
         freehand = getattr(config, "keyboard_hotkeys", {}).get("freehand") if config else None
+        translation_toggle = getattr(config, "keyboard_hotkeys", {}).get("translation_toggle") if config else None
         mouse = getattr(config, "mouse_hotkeys", {}).get("middle_button") if config else None
 
         self._set_if_changed(
@@ -2404,6 +2897,17 @@ class AsrController(QtCore.QObject):
             "_freehand_hotkey_text",
             self._format_keys_edit(freehand.keys) if freehand else "",
             self.freehandHotkeyTextChanged,
+        )
+
+        self._set_if_changed(
+            "_translation_toggle_hotkey_enabled",
+            bool(translation_toggle.enabled) if translation_toggle else False,
+            self.translationToggleHotkeyEnabledChanged,
+        )
+        self._set_if_changed(
+            "_translation_toggle_hotkey_text",
+            self._format_keys_edit(translation_toggle.keys) if translation_toggle else "",
+            self.translationToggleHotkeyTextChanged,
         )
 
         self._set_if_changed(
@@ -2532,6 +3036,8 @@ class AsrController(QtCore.QObject):
                     self._update_keyboard_hotkey("primary", keys=keys)
                 elif self._capture_target == "freehand":
                     self._update_keyboard_hotkey("freehand", keys=keys)
+                elif self._capture_target == "translation_toggle":
+                    self._update_keyboard_hotkey("translation_toggle", keys=keys)
                 self.hotkeyCaptured.emit(self._capture_target, self._format_keys_edit(keys))
             self._capture_target = None
             self._resume_hotkeys()
@@ -2668,6 +3174,27 @@ class AsrController(QtCore.QObject):
         access_token = settings.value("Connection/access_token", self._access_token)
         use_gzip = settings.value("Connection/use_gzip", self._use_gzip)
         saved_mode = settings.value("Connection/mode", self._mode)
+        recognition_language = settings.value("Connection/recognition_language", self._recognition_language)
+        translation_enabled = settings.value("Connection/translation_enabled", self._translation_enabled)
+        translation_base_url = settings.value("Connection/translation_base_url", self._translation_base_url)
+        translation_api_key = settings.value("Connection/translation_api_key", self._translation_api_key)
+        translation_model = settings.value("Connection/translation_model", self._translation_model)
+        translation_prompt = settings.value("Connection/translation_prompt", self._translation_prompt)
+        translation_source_language = settings.value(
+            "Connection/translation_source_language",
+            self._translation_source_language,
+        )
+        translation_target_language = settings.value(
+            "Connection/translation_target_language",
+            self._translation_target_language,
+        )
+        translation_models = settings.value("Connection/translation_models", None)
+
+        def coerce_bool(value: object) -> bool:
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
         if app_id is not None:
             self._app_id = str(app_id)
         if access_token is not None:
@@ -2680,6 +3207,35 @@ class AsrController(QtCore.QObject):
             mode = str(saved_mode).strip().lower()
             if mode in ("nostream", "bidi", "bidi_async"):
                 self._mode = mode
+        if recognition_language is not None:
+            self._recognition_language = str(recognition_language).strip() or "zh-CN"
+        self._translation_enabled = coerce_bool(translation_enabled)
+        if translation_base_url is not None:
+            self._translation_base_url = str(translation_base_url).strip()
+        if translation_api_key is not None:
+            self._translation_api_key = str(translation_api_key).strip()
+        if translation_model is not None:
+            self._translation_model = str(translation_model).strip()
+        if translation_prompt is not None:
+            self._translation_prompt = str(translation_prompt)
+        if translation_source_language is not None:
+            self._translation_source_language = str(translation_source_language).strip() or "自动检测"
+        if translation_target_language is not None:
+            self._translation_target_language = str(translation_target_language).strip() or "英文"
+        if translation_models:
+            try:
+                parsed_models = json.loads(str(translation_models))
+                if isinstance(parsed_models, list):
+                    self._translation_models = [
+                        {
+                            "id": str(item.get("id", "")).strip(),
+                            "owned_by": str(item.get("owned_by", "")).strip(),
+                        }
+                        for item in parsed_models
+                        if isinstance(item, dict) and str(item.get("id", "")).strip()
+                    ]
+            except Exception:
+                self._translation_models = []
 
     def _save_connection_config(self) -> None:
         settings = QtCore.QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
@@ -2687,6 +3243,15 @@ class AsrController(QtCore.QObject):
         settings.setValue("Connection/access_token", self._access_token)
         settings.setValue("Connection/use_gzip", self._use_gzip)
         settings.setValue("Connection/mode", self._mode)
+        settings.setValue("Connection/recognition_language", self._recognition_language)
+        settings.setValue("Connection/translation_enabled", self._translation_enabled)
+        settings.setValue("Connection/translation_base_url", self._translation_base_url)
+        settings.setValue("Connection/translation_api_key", self._translation_api_key)
+        settings.setValue("Connection/translation_model", self._translation_model)
+        settings.setValue("Connection/translation_prompt", self._translation_prompt)
+        settings.setValue("Connection/translation_source_language", self._translation_source_language)
+        settings.setValue("Connection/translation_target_language", self._translation_target_language)
+        settings.setValue("Connection/translation_models", json.dumps(self._translation_models, ensure_ascii=False))
         settings.sync()
 
     def _load_personalization_config(self) -> None:
@@ -2855,6 +3420,7 @@ class AsrController(QtCore.QObject):
         self._session_partial = ""
         if self._current_row is None:
             return
+        row = self._current_row
         content = self._current_session_text(include_partial=False)
         session_elapsed = self._current_session_elapsed()
         session_chars = sum(1 for c in content if not c.isspace())
@@ -2868,28 +3434,38 @@ class AsrController(QtCore.QObject):
             self._stats_total_chars += session_chars
             self._save_stats()
         if not content:
-            row = self._current_row
             self._history_model.remove_row(row)
             self._emit_history_removed(row)
         else:
-            self._history_model.update_item(self._current_row, text=content, partial=False)
-            self._emit_history_row(self._current_row)
+            should_translate = not cancelled and self._should_translate_output() and bool(content)
+            if should_translate:
+                self._history_model.update_item(row, text="翻译中...", partial=True)
+            else:
+                self._history_model.update_item(row, text=content, partial=False)
+            self._emit_history_row(row)
             if not cancelled:
-                clipboard = QtWidgets.QApplication.clipboard()
-                clipboard.setText(content)
-                if (
-                    self._auto_submit
-                    and self._session_mode == "toggle"
-                    and not self._user_cancelled
-                    and content
-                ):
-                    LOG.info(
-                        "AUTO_SUBMIT candidate mode=toggle session_mode=%s text_len=%d cancelled=%s",
-                        self._session_mode,
-                        len(content),
-                        self._user_cancelled,
-                    )
-                    self._auto_submit_text(content, immediate=False)
+                if should_translate:
+                    should_auto_submit = self._auto_submit and not self._user_cancelled and bool(content)
+                    self._set_translation_models_status("正在翻译最新识别结果...")
+                    if self.recording_indicator:
+                        self.recording_indicator.show_translating()
+                    self._start_translation_task(row, content, should_auto_submit)
+                else:
+                    clipboard = QtWidgets.QApplication.clipboard()
+                    clipboard.setText(content)
+                    if (
+                        self._auto_submit
+                        and self._session_mode == "toggle"
+                        and not self._user_cancelled
+                        and content
+                    ):
+                        LOG.info(
+                            "AUTO_SUBMIT candidate mode=toggle session_mode=%s text_len=%d cancelled=%s",
+                            self._session_mode,
+                            len(content),
+                            self._user_cancelled,
+                        )
+                        self._auto_submit_text(content, immediate=False)
         self._current_row = None
         self._stats_timer.stop()
         self._committed_text = ""
@@ -2898,8 +3474,8 @@ class AsrController(QtCore.QObject):
         self._session_started_at = None
         self._stop_escape_listener()
         self._update_stats()
-        self._hide_indicator()
-        self._hide_indicator()
+        if not self._translation_in_progress():
+            self._hide_indicator()
 
     def _current_session_text(self, include_partial: bool) -> str:
         text = self._committed_text.strip()
@@ -2939,7 +3515,9 @@ class AsrController(QtCore.QObject):
             self._committed_text = text
         self._update_current_item()
         if not skip_auto_submit:
-            if self._auto_submit and self._session_mode == "hold" and self._mode == "bidi_async":
+            if self._should_translate_output():
+                pass
+            elif self._auto_submit and self._session_mode == "hold" and self._mode == "bidi_async":
                 self._auto_submit_stream_update()
             else:
                 if self._auto_submit:
@@ -2955,7 +3533,12 @@ class AsrController(QtCore.QObject):
     def _set_partial(self, text: str) -> None:
         self._session_partial = text.strip()
         self._update_current_item()
-        if self._auto_submit and self._session_mode == "hold" and self._mode == "bidi_async":
+        if (
+            not self._should_translate_output()
+            and self._auto_submit
+            and self._session_mode == "hold"
+            and self._mode == "bidi_async"
+        ):
             self._auto_submit_stream_update()
         self._update_stats()
 
@@ -3016,6 +3599,7 @@ class AsrController(QtCore.QObject):
 
     def _default_request_json_text(self) -> str:
         is_nostream = self._mode == "nostream"
+        recognition_language = (self._recognition_language or "").strip() or "zh-CN"
         request = {
             "user": {"uid": "demo_uid"},
             "audio": {
@@ -3023,7 +3607,7 @@ class AsrController(QtCore.QObject):
                 "rate": 16000,
                 "bits": 16,
                 "channel": 1,
-                **({"language": "zh-CN"} if is_nostream else {}),
+                **({"language": recognition_language} if is_nostream else {}),
             },
             "request": {
                 "model_name": "bigmodel",
@@ -4058,7 +4642,8 @@ class AsrController(QtCore.QObject):
         self._pending_close_timer.stop()
         self._update_status_text()
         self._finalize_session(cancelled=False)
-        self._hide_indicator()
+        if not self._translation_in_progress():
+            self._hide_indicator()
 
     def _on_ws_error(self, msg: str) -> None:
         self._force_close()
@@ -4172,7 +4757,7 @@ class AsrController(QtCore.QObject):
 
         if self._pending_close_after_last and parsed.flags == 0b0011:
             session_text = self._current_session_text(include_partial=False)
-            if not self._user_cancelled and session_text:
+            if not self._user_cancelled and session_text and not self._should_translate_output():
                 clipboard = QtWidgets.QApplication.clipboard()
                 clipboard.setText(session_text)
                 self._log("INFO", f"已复制到剪贴板: {session_text}")
@@ -4308,6 +4893,8 @@ class AsrController(QtCore.QObject):
         self._hide_indicator()
 
     def _hide_indicator(self) -> None:
+        if self._translation_in_progress() and not self._sending and not self._connecting:
+            return
         if hasattr(self, "recording_indicator") and self.recording_indicator:
             try:
                 self.recording_indicator.hide()

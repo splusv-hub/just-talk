@@ -231,10 +231,13 @@
 
         input[type="text"] {
             width: 100%;
+            height: 42px;
             padding: 10px 12px;
             border-radius: var(--radius-md);
             border: 1px solid var(--border-color);
             font-size: 14px;
+            line-height: 1.2;
+            box-sizing: border-box;
             transition: all 0.2s;
         }
 
@@ -251,6 +254,112 @@
             border: 1px solid var(--border-color);
             font-size: 14px;
             background: #fff;
+        }
+
+        .model-select-wrap {
+            position: relative;
+        }
+
+        .select-trigger {
+            width: 100%;
+            height: 42px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            background: #fff;
+            color: var(--text-main);
+            font-size: 14px;
+            font-weight: 400;
+            padding: 10px 36px 10px 12px;
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            position: relative;
+            line-height: 1.2;
+            display: flex;
+            align-items: center;
+            box-sizing: border-box;
+            margin: 0;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+
+        .select-trigger::after {
+            content: "";
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            width: 8px;
+            height: 8px;
+            border-right: 2px solid #3f3f46;
+            border-bottom: 2px solid #3f3f46;
+            transform: translateY(-60%) rotate(45deg);
+            transition: transform 0.2s ease;
+        }
+
+        .model-select-wrap.open .select-trigger::after {
+            transform: translateY(-35%) rotate(-135deg);
+        }
+
+        .select-trigger:hover {
+            background: #fafafa;
+        }
+
+        .select-trigger:focus {
+            outline: none;
+            border-color: var(--accent-black);
+            box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.06);
+        }
+
+        .select-trigger:disabled {
+            cursor: default;
+            color: #71717a;
+            background: #fafafa;
+        }
+
+        .model-select-panel {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(100% + 6px);
+            max-height: 220px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 8px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-color);
+            background: var(--card-bg);
+            box-shadow: var(--shadow);
+            display: none;
+            z-index: 20;
+        }
+
+        .model-select-wrap.open .model-select-panel {
+            display: block;
+        }
+
+        .model-select-option {
+            width: 100%;
+            text-align: left;
+            border: none;
+            background: transparent;
+            padding: 8px 10px;
+            margin: 2px 0;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
+        }
+
+        .model-select-option:hover,
+        .model-select-option.active {
+            background: #e4e4e7;
         }
 
         textarea {
@@ -825,6 +934,21 @@
                     </div>
                 </div>
 
+                <div class="form-group" style="background: #f9fafb; padding: 12px; border-radius: var(--radius-md);">
+                    <div class="switch-row" style="margin-bottom: 8px;">
+                        <span style="font-size: 13px; font-weight: 700;">翻译开关</span>
+                        <label class="switch">
+                            <input id="translation-toggle-enabled" type="checkbox">
+                            <span class="slider"><span class="slider-knob"></span></span>
+                        </label>
+                    </div>
+                    <div class="hint-text" style="margin-bottom: 8px;">触发后直接切换“翻译输出”开关，并显示浮动提示。</div>
+                    <div class="hotkey-input-group">
+                        <input id="translation-toggle-keys" type="text" readonly placeholder="点击录制">
+                        <button class="btn btn-primary capture-btn" data-target="translation_toggle" style="padding: 0 12px;">录制</button>
+                    </div>
+                </div>
+
                 <div class="form-group" style="padding: 0 12px;">
                     <div class="switch-row" style="margin-bottom: 8px;">
                         <span style="font-size: 13px; font-weight: 600;">鼠标中键</span>
@@ -841,7 +965,7 @@
             </div>
 
             <div class="card">
-                <div class="card-title">连接配置</div>
+                <div class="card-title">语音识别连接配置</div>
                 <div class="hint-text" style="margin-bottom: 12px; padding: 10px 12px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; color: #92400e; font-size: 12px; line-height: 1.6;">
                     💡 使用前需要配置 App ID 和 Access Token。<br>请联系<strong>懒猫微服VIP群</strong>获取教程。
                 </div>
@@ -860,6 +984,69 @@
                         <span class="slider"><span class="slider-knob"></span></span>
                     </label>
                 </div>
+                <div class="form-group" style="margin-top: 16px; margin-bottom: 0;">
+                    <label>识别语种</label>
+                    <div id="recognition-language-wrap" class="model-select-wrap">
+                        <button id="recognition-language-trigger" class="select-trigger" type="button">中文</button>
+                        <div id="recognition-language-panel" class="model-select-panel"></div>
+                    </div>
+                    <div class="hint-text">默认中文。按豆包文档，此参数仅在精准模式生效。</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">LLM翻译连接配置</div>
+                <div class="form-group">
+                    <div class="switch-row" style="margin-bottom: 8px;">
+                        <span style="font-size: 13px; font-weight: 700;">翻译输出</span>
+                        <label class="switch">
+                            <input id="translation-enabled" type="checkbox">
+                            <span class="slider"><span class="slider-knob"></span></span>
+                        </label>
+                    </div>
+                    <div class="hint-text">开启后会在识别结束后调用 OpenAI 兼容接口做整段翻译，再写入历史记录、剪贴板和自动上屏。</div>
+                </div>
+                <div class="form-group">
+                    <div style="display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start;">
+                        <div>
+                            <label>翻译接口地址</label>
+                            <input id="translation-base-url" type="text" placeholder="输入翻译接口地址">
+                        </div>
+                        <div>
+                            <label>翻译 API Key</label>
+                            <input id="translation-api-key" type="text" placeholder="输入兼容 OpenAI 的 Bearer Token">
+                        </div>
+                        <div>
+                            <label>翻译模型</label>
+                            <div>
+                                <div id="translation-model-wrap" class="model-select-wrap">
+                                    <button id="translation-model-trigger" class="select-trigger" type="button">暂无模型</button>
+                                    <div id="translation-model-panel" class="model-select-panel"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: -4px;">
+                    <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start;">
+                        <div>
+                            <label>源语言</label>
+                            <input id="translation-source-language" type="text" value="自动检测" readonly disabled>
+                        </div>
+                        <div>
+                            <label>目标语言</label>
+                            <div id="translation-target-language-wrap" class="model-select-wrap">
+                                <button id="translation-target-language-trigger" class="select-trigger" type="button">英文</button>
+                                <div id="translation-target-language-panel" class="model-select-panel"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label>翻译提示词</label>
+                    <div class="hint-text" style="margin-bottom: 6px;">留空则按源语言/目标语言自动生成默认提示词。</div>
+                    <textarea id="translation-prompt" placeholder="你是一个专业翻译助手，请保持原意准确、表达自然。"></textarea>
+                </div>
             </div>
         </div>
     </div>
@@ -870,8 +1057,62 @@
  let controller = null;
  let historyData = [];
  let activeCaptureTarget = null;
+ const recognitionLanguageOptions = [
+   { value: "zh-CN", label: "中文" },
+   { value: "en-US", label: "英语" },
+   { value: "ja-JP", label: "日语" },
+   { value: "id-ID", label: "印尼语" },
+   { value: "es-MX", label: "西班牙语" },
+   { value: "pt-BR", label: "葡萄牙语" },
+   { value: "de-DE", label: "德语" },
+   { value: "fr-FR", label: "法语" },
+   { value: "ko-KR", label: "韩语" },
+   { value: "fil-PH", label: "菲律宾语" },
+   { value: "ms-MY", label: "马来语" },
+   { value: "th-TH", label: "泰语" },
+   { value: "ar-SA", label: "阿拉伯语" }
+ ];
+ const translationTargetLanguageOptions = [
+   { value: "英文", label: "英文" },
+   { value: "中文", label: "中文" },
+   { value: "日文", label: "日文" },
+   { value: "韩文", label: "韩文" },
+   { value: "法文", label: "法文" },
+   { value: "德文", label: "德文" },
+   { value: "西班牙文", label: "西班牙文" },
+   { value: "葡萄牙文", label: "葡萄牙文" },
+   { value: "阿拉伯文", label: "阿拉伯文" },
+   { value: "泰文", label: "泰文" }
+ ];
 
  function $(id) { return document.getElementById(id); }
+
+ function renderStaticSelect(wrapId, triggerId, panelId, options, currentValue, onSelect) {
+   const wrap = $(wrapId);
+   const trigger = $(triggerId);
+   const panel = $(panelId);
+   if (!wrap || !trigger || !panel) return;
+
+   panel.innerHTML = "";
+   let matchedLabel = "";
+   options.forEach((item) => {
+     const option = document.createElement("button");
+     option.type = "button";
+     option.className = "model-select-option";
+     option.textContent = item.label;
+     option.dataset.value = item.value;
+     if (item.value === currentValue) {
+       option.classList.add("active");
+       matchedLabel = item.label;
+     }
+     option.addEventListener("click", () => {
+       wrap.classList.remove("open");
+       onSelect && onSelect(item.value);
+     });
+     panel.appendChild(option);
+   });
+   trigger.textContent = matchedLabel || (options[0] ? options[0].label : "");
+ }
 
  // UI 更新函数
  function updateStatus() {
@@ -894,11 +1135,90 @@
    $("stat-speed").textContent = controller.statsSpeed;
  }
 
+ function renderTranslationModels() {
+   const wrap = $("translation-model-wrap");
+   const trigger = $("translation-model-trigger");
+   const panel = $("translation-model-panel");
+   if (!wrap || !trigger || !panel) return;
+   let models = [];
+   try {
+     models = JSON.parse((controller && controller.translationModelsJson) || "[]");
+   } catch (err) {
+     models = [];
+   }
+   const currentValue = (controller && controller.translationModel) || "";
+   panel.innerHTML = "";
+   trigger.disabled = !!(controller && controller.translationModelsLoading);
+   if (!models.length) {
+     trigger.textContent = (controller && controller.translationModelsLoading)
+       ? "获取中..."
+       : (currentValue || "选择翻译模型");
+   } else {
+     let matched = null;
+     models.forEach((item) => {
+       const value = item.id || "";
+       const label = item.id || "";
+       const option = document.createElement("button");
+       option.type = "button";
+       option.className = "model-select-option";
+       option.textContent = label;
+       option.dataset.value = value;
+       if (value === currentValue) {
+         option.classList.add("active");
+         matched = label;
+       }
+       option.addEventListener("click", () => {
+         if (!controller) return;
+         controller.translationModel = value;
+         wrap.classList.remove("open");
+       });
+       panel.appendChild(option);
+     });
+     if (currentValue && !models.some((item) => item.id === currentValue)) {
+       const option = document.createElement("button");
+       option.type = "button";
+       option.className = "model-select-option active";
+       option.textContent = `${currentValue} (当前值)`;
+       option.dataset.value = currentValue;
+       option.addEventListener("click", () => {
+         if (!controller) return;
+         controller.translationModel = currentValue;
+         wrap.classList.remove("open");
+       });
+       panel.appendChild(option);
+       matched = `${currentValue} (当前值)`;
+     }
+     trigger.textContent = matched || currentValue || models[0].id || "选择翻译模型";
+   }
+ }
+
  function updateForms() {
    if (!controller) return;
    $("app-id").value = controller.appId || "";
    $("access-token").value = controller.accessToken || "";
    $("use-gzip").checked = !!controller.useGzip;
+   renderStaticSelect(
+     "recognition-language-wrap",
+     "recognition-language-trigger",
+     "recognition-language-panel",
+     recognitionLanguageOptions,
+     controller.recognitionLanguage || "zh-CN",
+     (value) => controller && (controller.recognitionLanguage = value)
+   );
+   $("translation-enabled").checked = !!controller.translationEnabled;
+   $("translation-base-url").value = controller.translationBaseUrl || "";
+   $("translation-api-key").value = controller.translationApiKey || "";
+   $("translation-source-language").value = "自动检测";
+   renderStaticSelect(
+     "translation-target-language-wrap",
+     "translation-target-language-trigger",
+     "translation-target-language-panel",
+     translationTargetLanguageOptions,
+     controller.translationTargetLanguage || "英文",
+     (value) => controller && (controller.translationTargetLanguage = value)
+   );
+   $("translation-prompt").value = controller.translationPrompt || "";
+   renderTranslationModels();
    $("start-minimized").checked = !!controller.startMinimized;
    $("auto-submit").checked = !!controller.autoSubmit;
    syncAutoSubmitModeOptions();
@@ -933,6 +1253,9 @@
    // 自由说热键 (固定为切换模式)
    $("freehand-keys").value = controller.freehandHotkeyText || "";
    $("freehand-enabled").checked = !!controller.freehandHotkeyEnabled;
+
+   $("translation-toggle-keys").value = controller.translationToggleHotkeyText || "";
+   $("translation-toggle-enabled").checked = !!controller.translationToggleHotkeyEnabled;
 
    // 鼠标中键
    $("mouse-enabled").checked = !!controller.mouseModeEnabled;
@@ -1072,6 +1395,37 @@
    $("app-id").addEventListener("change", (e) => controller && (controller.appId = e.target.value));
    $("access-token").addEventListener("change", (e) => controller && (controller.accessToken = e.target.value));
    $("use-gzip").addEventListener("change", (e) => controller && (controller.useGzip = e.target.checked));
+   $("translation-enabled").addEventListener("change", (e) => controller && (controller.translationEnabled = e.target.checked));
+   $("translation-base-url").addEventListener("change", (e) => controller && (controller.translationBaseUrl = e.target.value));
+   $("translation-api-key").addEventListener("change", (e) => controller && (controller.translationApiKey = e.target.value));
+   $("translation-prompt").addEventListener("input", (e) => controller && (controller.translationPrompt = e.target.value));
+   $("translation-model-trigger").addEventListener("click", (e) => {
+     e.stopPropagation();
+     const wrap = $("translation-model-wrap");
+     if (!wrap) return;
+     if (controller && !controller.translationModelsLoading) {
+       let models = [];
+       try {
+         models = JSON.parse(controller.translationModelsJson || "[]");
+       } catch (err) {
+         models = [];
+       }
+       if (!models.length) {
+         controller.refreshTranslationModels();
+       }
+     }
+     wrap.classList.toggle("open");
+   });
+   $("recognition-language-trigger").addEventListener("click", (e) => {
+     e.stopPropagation();
+     const wrap = $("recognition-language-wrap");
+     if (wrap) wrap.classList.toggle("open");
+   });
+   $("translation-target-language-trigger").addEventListener("click", (e) => {
+     e.stopPropagation();
+     const wrap = $("translation-target-language-wrap");
+     if (wrap) wrap.classList.toggle("open");
+   });
    $("start-minimized").addEventListener("change", (e) => controller && (controller.startMinimized = e.target.checked));
    $("auto-submit").addEventListener("change", (e) => {
      if (!controller) return;
@@ -1116,6 +1470,7 @@
 
    $("primary-enabled").addEventListener("change", (e) => controller && (controller.primaryHotkeyEnabled = e.target.checked));
    $("freehand-enabled").addEventListener("change", (e) => controller && (controller.freehandHotkeyEnabled = e.target.checked));
+   $("translation-toggle-enabled").addEventListener("change", (e) => controller && (controller.translationToggleHotkeyEnabled = e.target.checked));
    $("mouse-enabled").addEventListener("change", (e) => controller && (controller.mouseModeEnabled = e.target.checked));
 
    // 鼠标中键模式切换
@@ -1146,6 +1501,27 @@
      if (panel && panel.style.display === "block") {
        if (!panel.contains(e.target) && !toggle.contains(e.target)) {
          panel.style.display = "none";
+       }
+     }
+     const modelWrap = $("translation-model-wrap");
+     const modelTrigger = $("translation-model-trigger");
+     if (modelWrap && modelWrap.classList.contains("open")) {
+       if (!modelWrap.contains(e.target) && e.target !== modelTrigger) {
+         modelWrap.classList.remove("open");
+       }
+     }
+     const recognitionWrap = $("recognition-language-wrap");
+     const recognitionTrigger = $("recognition-language-trigger");
+     if (recognitionWrap && recognitionWrap.classList.contains("open")) {
+       if (!recognitionWrap.contains(e.target) && e.target !== recognitionTrigger) {
+         recognitionWrap.classList.remove("open");
+       }
+     }
+     const targetLangWrap = $("translation-target-language-wrap");
+     const targetLangTrigger = $("translation-target-language-trigger");
+     if (targetLangWrap && targetLangWrap.classList.contains("open")) {
+       if (!targetLangWrap.contains(e.target) && e.target !== targetLangTrigger) {
+         targetLangWrap.classList.remove("open");
        }
      }
      if (!activeCaptureTarget) return;
@@ -1290,11 +1666,16 @@
    const signals = [
      'statusTextChanged', 'isConnectingChanged', 'isSendingChanged',
      'isConnectedChanged', 'statsChanged', 'modeChanged',
-     'appIdChanged', 'accessTokenChanged', 'useGzipChanged',
+     'appIdChanged', 'accessTokenChanged', 'useGzipChanged', 'recognitionLanguageChanged',
+     'translationEnabledChanged', 'translationBaseUrlChanged', 'translationApiKeyChanged',
+     'translationModelChanged', 'translationPromptChanged', 'translationSourceLanguageChanged',
+     'translationTargetLanguageChanged', 'translationModelsChanged', 'translationModelsLoadingChanged',
+     'translationModelsStatusChanged',
      'startMinimizedChanged', 'autoSubmitChanged', 'autoSubmitModeChanged',
      'enablePuncChanged', 'enableDdcChanged', 'enableDelayedStopChanged', 'hotwordsChanged',
      'primaryHotkeyTextChanged', 'primaryHotkeyEnabledChanged',
      'freehandHotkeyTextChanged', 'freehandHotkeyEnabledChanged',
+     'translationToggleHotkeyTextChanged', 'translationToggleHotkeyEnabledChanged',
      'mouseHotkeyModeChanged', 'mouseModeEnabledChanged'
    ];
 

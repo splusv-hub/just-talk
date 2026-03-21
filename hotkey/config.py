@@ -81,6 +81,9 @@ class GlobalHotkeySettings:
                 "freehand": HotkeyConfig(
                     enabled=True, keys=["alt", "super"], mode="toggle"
                 ),
+                "translation_toggle": HotkeyConfig(
+                    enabled=False, keys=["ctrl", "shift", "t"], mode="toggle"
+                ),
             },
             mouse_hotkeys={
                 "middle_button": MouseButtonConfig(
