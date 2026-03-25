@@ -1147,12 +1147,14 @@
      models = [];
    }
    const currentValue = (controller && controller.translationModel) || "";
+   const statusText = (controller && controller.translationModelsStatus) || "";
+   const hasRequested = !!models.length || (statusText && statusText !== "未获取模型列表");
    panel.innerHTML = "";
    trigger.disabled = !!(controller && controller.translationModelsLoading);
    if (!models.length) {
      trigger.textContent = (controller && controller.translationModelsLoading)
        ? "获取中..."
-       : (currentValue || "选择翻译模型");
+       : "请点击获取";
    } else {
      let matched = null;
      models.forEach((item) => {
@@ -1190,6 +1192,7 @@
      }
      trigger.textContent = matched || currentValue || models[0].id || "选择翻译模型";
    }
+   wrap.dataset.requested = hasRequested ? "1" : "0";
  }
 
  function updateForms() {
@@ -1410,11 +1413,14 @@
        } catch (err) {
          models = [];
        }
-       if (!models.length) {
-         controller.refreshTranslationModels();
+       const hasRequested = wrap.dataset.requested === "1";
+       controller.refreshTranslationModels();
+       if (hasRequested && models.length) {
+         wrap.classList.toggle("open");
+         return;
        }
      }
-     wrap.classList.toggle("open");
+     wrap.classList.remove("open");
    });
    $("recognition-language-trigger").addEventListener("click", (e) => {
      e.stopPropagation();
