@@ -70,6 +70,16 @@ def _force_x11_platform() -> None:
 def _bootstrap_runtime() -> None:
     _setup_logging()
     _force_x11_platform()
+    try:
+        import certifi
+
+        cert_path = certifi.where()
+        if os.path.isfile(cert_path):
+            os.environ["SSL_CERT_FILE"] = cert_path
+            os.environ["REQUESTS_CA_BUNDLE"] = cert_path
+            os.environ["CURL_CA_BUNDLE"] = cert_path
+    except Exception:
+        pass
     if not getattr(sys, "frozen", False):
         return
     base_dir = getattr(sys, "_MEIPASS", "")
@@ -78,6 +88,11 @@ def _bootstrap_runtime() -> None:
     qt_bin = os.path.join(base_dir, "PyQt6", "Qt6", "bin")
     if os.path.isdir(qt_bin):
         os.environ["PATH"] = qt_bin + os.pathsep + os.environ.get("PATH", "")
+    bundled_cert = os.path.join(base_dir, "certifi", "cacert.pem")
+    if os.path.isfile(bundled_cert):
+        os.environ["SSL_CERT_FILE"] = bundled_cert
+        os.environ["REQUESTS_CA_BUNDLE"] = bundled_cert
+        os.environ["CURL_CA_BUNDLE"] = bundled_cert
 
 
 _bootstrap_runtime()
@@ -130,6 +145,18 @@ def _qt_audio_input_available() -> bool:
         return len(QMediaDevices.audioInputs()) > 0
     except Exception:
         return False
+
+
+def _default_ssl_context() -> ssl.SSLContext:
+    cafile = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")
+    if cafile and os.path.isfile(cafile):
+        return ssl.create_default_context(cafile=cafile)
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def _setup_frozen_qt_env() -> None:
@@ -486,12 +513,7 @@ def _ws_connect(url: str, headers: dict) -> Tuple[socket.socket, _WsFrameReader]
     raw = socket.create_connection((host, port), timeout=10)
     sock: socket.socket
     if u.scheme == "wss":
-        # Use certifi for CA certificates (needed for PyInstaller on macOS)
-        try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            ctx = ssl.create_default_context()
+        ctx = _default_ssl_context()
         sock = ctx.wrap_socket(raw, server_hostname=host)
     else:
         sock = raw
@@ -1627,7 +1649,7 @@ class AsrController(QtCore.QObject):
             headers["Content-Type"] = "application/json"
         req = urllib_request.Request(url, data=data, headers=headers, method=method.upper())
         try:
-            with urllib_request.urlopen(req, timeout=timeout) as resp:
+            with urllib_request.urlopen(req, timeout=timeout, context=_default_ssl_context()) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
         except urllib_error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

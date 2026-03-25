@@ -42,6 +42,7 @@ if icon_path and not os.path.exists(icon_path):
 datas = [("web", "web")]
 if os.path.exists("icon.png"):
     datas.append(("icon.png", "."))
+datas += collect_data_files("certifi")
 
 # 只收集必要的 Qt 插件
 qt_plugins_needed = [
