@@ -1,7 +1,7 @@
 """快捷键管理器 - 协调监听器和应用状态"""
 
 import sys
-from typing import Optional
+from typing import Optional, Set
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -24,6 +24,8 @@ class HotkeyManager(QObject):
     stop_recording_requested = pyqtSignal()
     snippet_triggered = pyqtSignal(str, str)  # (snippet_id, text)
     translation_toggle_requested = pyqtSignal()
+    debug_paste_requested = pyqtSignal()
+    retry_failed_recording_requested = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -34,6 +36,7 @@ class HotkeyManager(QObject):
         self._active_hotkey: Optional[str] = None
         self._enabled = True
         self._suspended = False
+        self._blocked_hotkeys: Set[str] = set()
 
     def get_config(self) -> GlobalHotkeySettings:
         """获取当前配置"""
@@ -70,6 +73,13 @@ class HotkeyManager(QObject):
         else:
             if self._enabled:
                 self.start_listening()
+
+    def set_blocked_hotkeys(self, hotkey_ids: Set[str]) -> None:
+        """临时屏蔽部分快捷键"""
+        blocked = {str(hotkey_id).strip() for hotkey_id in hotkey_ids if str(hotkey_id).strip()}
+        self._blocked_hotkeys = blocked
+        if self._active_hotkey and self._active_hotkey in self._blocked_hotkeys:
+            self.reset_state()
 
     def start_listening(self) -> None:
         """启动快捷键监听"""
@@ -111,8 +121,16 @@ class HotkeyManager(QObject):
         """处理快捷键事件"""
         if not self._enabled or self._suspended:
             return
+        if hotkey_id in self._blocked_hotkeys:
+            return
         if hotkey_id == "translation_toggle" and action == "toggle":
             self.translation_toggle_requested.emit()
+            return
+        if hotkey_id == "debug_paste" and action == "toggle":
+            self.debug_paste_requested.emit()
+            return
+        if hotkey_id == "retry_failed_recording" and action == "toggle":
+            self.retry_failed_recording_requested.emit()
             return
         if action == "press":
             # 按住模式 - 开始录音

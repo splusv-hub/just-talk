@@ -947,6 +947,10 @@ class RecordingIndicatorManager(QtCore.QObject):
         if self._toast:
             self._toast.hide()
 
+    def hide_status_toast(self) -> None:
+        self._toast_timer.stop()
+        self._hide_toast()
+
     def cleanup(self) -> None:
         """清理资源"""
         if self._indicator:

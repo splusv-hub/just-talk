@@ -84,6 +84,9 @@ class GlobalHotkeySettings:
                 "translation_toggle": HotkeyConfig(
                     enabled=False, keys=["ctrl", "shift", "t"], mode="toggle"
                 ),
+                "debug_paste": HotkeyConfig(
+                    enabled=False, keys=["ctrl", "shift", "y"], mode="toggle"
+                ),
             },
             mouse_hotkeys={
                 "middle_button": MouseButtonConfig(
@@ -126,15 +129,20 @@ class GlobalHotkeySettings:
     @classmethod
     def from_dict(cls, data: dict) -> "GlobalHotkeySettings":
         """从字典创建配置对象"""
+        defaults = cls.get_defaults()
         keyboard_hotkeys = {
             hk_id: HotkeyConfig(**hk_data)
             for hk_id, hk_data in data.get("keyboard_hotkeys", {}).items()
         }
+        merged_keyboard = dict(defaults.keyboard_hotkeys)
+        merged_keyboard.update(keyboard_hotkeys)
 
         mouse_hotkeys = {
             mb_id: MouseButtonConfig(**mb_data)
             for mb_id, mb_data in data.get("mouse_hotkeys", {}).items()
         }
+        merged_mouse = dict(defaults.mouse_hotkeys)
+        merged_mouse.update(mouse_hotkeys)
 
         text_snippets = {
             snip_id: TextSnippetConfig(**snip_data)
@@ -142,7 +150,7 @@ class GlobalHotkeySettings:
         }
 
         return cls(
-            keyboard_hotkeys=keyboard_hotkeys,
-            mouse_hotkeys=mouse_hotkeys,
+            keyboard_hotkeys=merged_keyboard,
+            mouse_hotkeys=merged_mouse,
             text_snippets=text_snippets,
         )

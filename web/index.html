@@ -949,6 +949,21 @@
                     </div>
                 </div>
 
+                <div class="form-group" style="background: #f9fafb; padding: 12px; border-radius: var(--radius-md);">
+                    <div class="switch-row" style="margin-bottom: 8px;">
+                        <span style="font-size: 13px; font-weight: 700;">调试粘贴</span>
+                        <label class="switch">
+                            <input id="debug-paste-enabled" type="checkbox">
+                            <span class="slider"><span class="slider-knob"></span></span>
+                        </label>
+                    </div>
+                    <div class="hint-text" style="margin-bottom: 8px;">直接触发当前 Linux 自动上屏链路，不经过录音，可用于复现粘贴卡死问题。</div>
+                    <div class="hotkey-input-group">
+                        <input id="debug-paste-keys" type="text" readonly placeholder="点击录制">
+                        <button class="btn btn-primary capture-btn" data-target="debug_paste" style="padding: 0 12px;">录制</button>
+                    </div>
+                </div>
+
                 <div class="form-group" style="padding: 0 12px;">
                     <div class="switch-row" style="margin-bottom: 8px;">
                         <span style="font-size: 13px; font-weight: 600;">鼠标中键</span>
@@ -1260,6 +1275,9 @@
    $("translation-toggle-keys").value = controller.translationToggleHotkeyText || "";
    $("translation-toggle-enabled").checked = !!controller.translationToggleHotkeyEnabled;
 
+   $("debug-paste-keys").value = controller.debugPasteHotkeyText || "";
+   $("debug-paste-enabled").checked = !!controller.debugPasteHotkeyEnabled;
+
    // 鼠标中键
    $("mouse-enabled").checked = !!controller.mouseModeEnabled;
    setSegActive("mouse", controller.mouseHotkeyMode);
@@ -1477,6 +1495,7 @@
    $("primary-enabled").addEventListener("change", (e) => controller && (controller.primaryHotkeyEnabled = e.target.checked));
    $("freehand-enabled").addEventListener("change", (e) => controller && (controller.freehandHotkeyEnabled = e.target.checked));
    $("translation-toggle-enabled").addEventListener("change", (e) => controller && (controller.translationToggleHotkeyEnabled = e.target.checked));
+   $("debug-paste-enabled").addEventListener("change", (e) => controller && (controller.debugPasteHotkeyEnabled = e.target.checked));
    $("mouse-enabled").addEventListener("change", (e) => controller && (controller.mouseModeEnabled = e.target.checked));
 
    // 鼠标中键模式切换
@@ -1682,6 +1701,7 @@
      'primaryHotkeyTextChanged', 'primaryHotkeyEnabledChanged',
      'freehandHotkeyTextChanged', 'freehandHotkeyEnabledChanged',
      'translationToggleHotkeyTextChanged', 'translationToggleHotkeyEnabledChanged',
+     'debugPasteHotkeyTextChanged', 'debugPasteHotkeyEnabledChanged',
      'mouseHotkeyModeChanged', 'mouseModeEnabledChanged'
    ];
 

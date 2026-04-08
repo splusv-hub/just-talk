@@ -18,7 +18,7 @@ import time
 import uuid
 from array import array
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import BinaryIO, Dict, List, Optional, Set, Tuple
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse
@@ -1378,6 +1378,10 @@ class AsrController(QtCore.QObject):
     freehandHotkeyEnabledChanged = QtCore.pyqtSignal()
     translationToggleHotkeyTextChanged = QtCore.pyqtSignal()
     translationToggleHotkeyEnabledChanged = QtCore.pyqtSignal()
+    debugPasteHotkeyTextChanged = QtCore.pyqtSignal()
+    debugPasteHotkeyEnabledChanged = QtCore.pyqtSignal()
+    retryFailedRecordingHotkeyTextChanged = QtCore.pyqtSignal()
+    retryFailedRecordingHotkeyEnabledChanged = QtCore.pyqtSignal()
     mouseHotkeyModeChanged = QtCore.pyqtSignal()
     tutorialHoldTextChanged = QtCore.pyqtSignal()
     tutorialToggleTextChanged = QtCore.pyqtSignal()
@@ -1506,6 +1510,27 @@ class AsrController(QtCore.QObject):
         self._freehand_hotkey_enabled = True
         self._translation_toggle_hotkey_text = ""
         self._translation_toggle_hotkey_enabled = False
+        self._debug_paste_hotkey_text = ""
+        self._debug_paste_hotkey_enabled = False
+        self._retry_failed_recording_hotkey_text = ""
+        self._retry_failed_recording_hotkey_enabled = True
+        self._debug_paste_trigger_count = 0
+        self._debug_paste_in_progress = False
+        self._debug_paste_burst_count = 6
+        self._debug_paste_interval_ms = 70
+        self._session_cache_path: Optional[str] = None
+        self._session_cache_file: Optional[BinaryIO] = None
+        self._session_cache_bytes = 0
+        self._session_cache_created_at = 0.0
+        self._pending_translation_recordings: Dict[int, Dict[str, object]] = {}
+        self._last_failed_recording: Optional[Dict[str, object]] = None
+        self._retry_replay_active = False
+        self._retry_replay_failed_path: Optional[str] = None
+        self._retry_replay_session_mode = "hold"
+        self._retry_prompt_active = False
+        self._retry_prompt_timer = QtCore.QTimer(self)
+        self._retry_prompt_timer.setSingleShot(True)
+        self._retry_prompt_timer.timeout.connect(self._dismiss_retry_prompt)
         self._mouse_hotkey_mode = "hold"
         self._tutorial_hold_text = ""
         self._tutorial_toggle_text = ""
@@ -1566,11 +1591,14 @@ class AsrController(QtCore.QObject):
             self.hotkey_manager.stop_recording_requested.connect(self.stop_recognition)
             self.hotkey_manager.snippet_triggered.connect(self._on_snippet_triggered)
             self.hotkey_manager.translation_toggle_requested.connect(self.toggleTranslationEnabledByHotkey)
+            self.hotkey_manager.debug_paste_requested.connect(self._on_debug_paste_requested)
+            self.hotkey_manager.retry_failed_recording_requested.connect(self.retryLastFailedRecording)
             self.hotkey_manager.error_occurred.connect(self._on_hotkey_error)
 
             config = ConfigManager.load_config()
             self.hotkey_manager.update_config(config)
             self.hotkey_manager.start_listening()
+            self._sync_retry_prompt_hotkeys()
             self._hotkeys_enabled = True
             mouse_cfg = config.mouse_hotkeys.get("middle_button")
             self._mouse_mode_enabled = bool(mouse_cfg and mouse_cfg.enabled)
@@ -1585,12 +1613,324 @@ class AsrController(QtCore.QObject):
         self._load_personalization_config()
         self._refresh_auto_submit_status()
         self._load_stats()
+        self._load_last_failed_recording_state()
         if self._is_mac:
             self._check_mac_permissions_impl()
         if self._is_kde_wayland:
             self._check_kde_permissions_impl()
         self._update_status_text()
         self._update_stats()
+
+    def _retry_cache_dir(self) -> str:
+        base = QtCore.QStandardPaths.writableLocation(
+            QtCore.QStandardPaths.StandardLocation.CacheLocation
+        )
+        if not base:
+            if self._is_windows:
+                base = os.path.join(os.path.expanduser("~"), "AppData", "Local", "JustTalk")
+            else:
+                base = os.path.join(os.path.expanduser("~"), ".cache", "JustTalk")
+        path = os.path.join(base, "retry-cache")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _last_failed_recording_json_path(self) -> str:
+        return os.path.join(self._retry_cache_dir(), "last_failed_recording.json")
+
+    def _last_failed_recording_audio_path(self) -> str:
+        return os.path.join(self._retry_cache_dir(), "last_failed_recording.pcm")
+
+    def _save_last_failed_recording_state(self) -> None:
+        if not self._last_failed_recording:
+            return
+        payload = dict(self._last_failed_recording)
+        with open(self._last_failed_recording_json_path(), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+    def _load_last_failed_recording_state(self) -> None:
+        path = self._last_failed_recording_json_path()
+        if not os.path.isfile(path):
+            self._last_failed_recording = None
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            audio_path = str(payload.get("path", "")).strip()
+            if not audio_path or not os.path.isfile(audio_path):
+                self._clear_last_failed_recording(delete_audio=False)
+                return
+            self._last_failed_recording = payload
+        except Exception:
+            self._clear_last_failed_recording()
+
+    def _clear_last_failed_recording(self, delete_audio: bool = True) -> None:
+        payload = self._last_failed_recording
+        self._last_failed_recording = None
+        try:
+            os.remove(self._last_failed_recording_json_path())
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        if not delete_audio:
+            return
+        audio_path = ""
+        if payload:
+            audio_path = str(payload.get("path", "")).strip()
+        if not audio_path:
+            audio_path = self._last_failed_recording_audio_path()
+        try:
+            os.remove(audio_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def _retry_hotkey_label(self) -> str:
+        base_keys = self._parse_keys_text(self._freehand_hotkey_text)
+        retry_keys = self._derive_retry_failed_recording_keys(base_keys)
+        text = self._format_keys_edit(retry_keys)
+        if text:
+            return text
+        return "Down"
+
+    def _derive_retry_failed_recording_keys(self, freehand_keys: List[str]) -> List[str]:
+        keys = [key for key in freehand_keys if key]
+        if "down" not in keys:
+            keys.append("down")
+        return keys
+
+    def _apply_derived_retry_hotkey(self, config) -> None:
+        if not config:
+            self._set_if_changed("_retry_failed_recording_hotkey_enabled", False, self.retryFailedRecordingHotkeyEnabledChanged)
+            self._set_if_changed("_retry_failed_recording_hotkey_text", "", self.retryFailedRecordingHotkeyTextChanged)
+            return
+        try:
+            from hotkey.config import HotkeyConfig
+        except Exception:
+            return
+        freehand = getattr(config, "keyboard_hotkeys", {}).get("freehand")
+        enabled = bool(freehand and freehand.enabled)
+        base_keys = list(freehand.keys) if freehand else []
+        retry_keys = self._derive_retry_failed_recording_keys(base_keys)
+        retry_hotkey = HotkeyConfig(enabled=enabled, keys=retry_keys, mode="toggle")
+        config.keyboard_hotkeys["retry_failed_recording"] = retry_hotkey
+        self._set_if_changed(
+            "_retry_failed_recording_hotkey_enabled",
+            enabled,
+            self.retryFailedRecordingHotkeyEnabledChanged,
+        )
+        self._set_if_changed(
+            "_retry_failed_recording_hotkey_text",
+            self._format_keys_edit(retry_keys) if enabled else "",
+            self.retryFailedRecordingHotkeyTextChanged,
+        )
+
+    def _sync_retry_prompt_hotkeys(self) -> None:
+        if not self.hotkey_manager:
+            return
+        if self._retry_prompt_active:
+            self.hotkey_manager.set_blocked_hotkeys({"freehand"})
+        else:
+            self.hotkey_manager.set_blocked_hotkeys({"retry_failed_recording"})
+
+    def _show_retry_available_toast(self, stage: str) -> None:
+        self._retry_prompt_active = True
+        self._retry_prompt_timer.start(5200)
+        self._sync_retry_prompt_hotkeys()
+        self._ensure_escape_listener()
+        if not self.recording_indicator:
+            return
+        stage_text = "翻译失败" if stage == "translation" else "识别失败"
+        if self._retry_failed_recording_hotkey_enabled:
+            text = f"{stage_text}，可按 {self._retry_hotkey_label()} 重试本次录音"
+        else:
+            text = f"{stage_text}，最近一次失败录音已缓存"
+        self.recording_indicator.show_status_toast(
+            text,
+            accent="#f59e0b",
+            duration_ms=5200,
+        )
+
+    def _show_retry_unavailable_toast(self, text: str) -> None:
+        if self.recording_indicator:
+            self.recording_indicator.show_status_toast(text, accent="#f59e0b", duration_ms=2200)
+
+    def _ensure_escape_listener(self) -> None:
+        if self._escape_listener is not None:
+            return
+        self._start_escape_listener()
+
+    def _dismiss_retry_prompt(self) -> None:
+        if not self._retry_prompt_active:
+            return
+        self._retry_prompt_active = False
+        self._retry_prompt_timer.stop()
+        self._sync_retry_prompt_hotkeys()
+        if self.recording_indicator:
+            self.recording_indicator.hide_status_toast()
+        if self._session_mode != "toggle":
+            self._stop_escape_listener()
+
+    def _begin_session_recording_cache(self) -> None:
+        self._discard_session_recording_cache()
+        if self._retry_replay_active:
+            return
+        try:
+            path = os.path.join(self._retry_cache_dir(), f"session-{uuid.uuid4().hex}.pcm")
+            fh = open(path, "wb")
+            self._session_cache_path = path
+            self._session_cache_file = fh
+            self._session_cache_bytes = 0
+            self._session_cache_created_at = time.time()
+        except Exception as exc:
+            self._session_cache_path = None
+            self._session_cache_file = None
+            self._session_cache_bytes = 0
+            self._session_cache_created_at = 0.0
+            self._log("RETRY", f"无法创建录音缓存: {exc}")
+
+    def _append_session_recording_cache(self, pcm16k: bytes) -> None:
+        if self._retry_replay_active or not pcm16k or not self._session_cache_file:
+            return
+        try:
+            self._session_cache_file.write(pcm16k)
+            self._session_cache_bytes += len(pcm16k)
+        except Exception as exc:
+            self._log("RETRY", f"写入录音缓存失败: {exc}")
+            self._discard_session_recording_cache()
+
+    def _close_session_recording_cache(self) -> None:
+        if not self._session_cache_file:
+            return
+        try:
+            self._session_cache_file.flush()
+        except Exception:
+            pass
+        try:
+            self._session_cache_file.close()
+        except Exception:
+            pass
+        self._session_cache_file = None
+
+    def _take_session_recording_cache(self) -> Optional[Dict[str, object]]:
+        self._close_session_recording_cache()
+        path = (self._session_cache_path or "").strip()
+        if not path or not os.path.isfile(path) or self._session_cache_bytes <= 0:
+            self._discard_session_recording_cache()
+            return None
+        payload: Dict[str, object] = {
+            "path": path,
+            "bytes": int(self._session_cache_bytes),
+            "created_at": float(self._session_cache_created_at or time.time()),
+            "session_mode": self._session_mode or "hold",
+        }
+        self._session_cache_path = None
+        self._session_cache_bytes = 0
+        self._session_cache_created_at = 0.0
+        return payload
+
+    def _discard_cache_info(self, payload: Optional[Dict[str, object]]) -> None:
+        if not payload:
+            return
+        raw_path = payload.get("path", "")
+        path = str(raw_path).strip() if raw_path is not None else ""
+        if not path:
+            return
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def _discard_session_recording_cache(self) -> None:
+        payload = {
+            "path": self._session_cache_path,
+        }
+        self._close_session_recording_cache()
+        self._session_cache_path = None
+        self._session_cache_bytes = 0
+        self._session_cache_created_at = 0.0
+        self._discard_cache_info(payload)
+
+    def _persist_failed_recording(
+        self,
+        payload: Dict[str, object],
+        failure_stage: str,
+        failure_message: str,
+    ) -> bool:
+        path = str(payload.get("path", "")).strip()
+        if not path or not os.path.isfile(path):
+            return False
+        dest_audio = self._last_failed_recording_audio_path()
+        try:
+            self._clear_last_failed_recording()
+            os.replace(path, dest_audio)
+            metadata = {
+                "path": dest_audio,
+                "bytes": int(payload.get("bytes", 0) or 0),
+                "created_at": float(payload.get("created_at", time.time()) or time.time()),
+                "session_mode": str(payload.get("session_mode", "hold") or "hold"),
+                "failure_stage": failure_stage,
+                "failure_message": failure_message,
+                "updated_at": time.time(),
+            }
+            self._last_failed_recording = metadata
+            self._save_last_failed_recording_state()
+            return True
+        except Exception as exc:
+            self._log("RETRY", f"保存失败录音缓存失败: {exc}")
+            return False
+
+    def _refresh_existing_failed_recording(self, failure_stage: str, failure_message: str) -> bool:
+        if not self._last_failed_recording:
+            return False
+        path = str(self._last_failed_recording.get("path", "")).strip()
+        if not path or not os.path.isfile(path):
+            self._clear_last_failed_recording(delete_audio=False)
+            return False
+        self._last_failed_recording["failure_stage"] = failure_stage
+        self._last_failed_recording["failure_message"] = failure_message
+        self._last_failed_recording["updated_at"] = time.time()
+        try:
+            self._save_last_failed_recording_state()
+        except Exception:
+            return False
+        return True
+
+    def _store_pending_translation_recording(self, row: int, payload: Dict[str, object]) -> None:
+        self._pending_translation_recordings[row] = payload
+
+    def _pop_pending_translation_recording(self, row: int) -> Optional[Dict[str, object]]:
+        return self._pending_translation_recordings.pop(row, None)
+
+    def _mark_recognition_failure_retryable(self, message: str) -> bool:
+        if self._retry_replay_active:
+            return self._refresh_existing_failed_recording("recognition", message)
+        payload = self._take_session_recording_cache()
+        if not payload:
+            return False
+        return self._persist_failed_recording(payload, "recognition", message)
+
+    def _mark_translation_failure_retryable(self, row: int, message: str) -> bool:
+        pending = self._pop_pending_translation_recording(row)
+        if pending and pending.get("kind") == "session_cache":
+            cache_payload = pending.get("cache")
+            if isinstance(cache_payload, dict):
+                return self._persist_failed_recording(cache_payload, "translation", message)
+        if pending and pending.get("kind") == "retry_replay":
+            return self._refresh_existing_failed_recording("translation", message)
+        return False
+
+    def _complete_retry_tracking_success(self, row: int) -> None:
+        pending = self._pop_pending_translation_recording(row)
+        if pending and pending.get("kind") == "session_cache":
+            cache_payload = pending.get("cache")
+            if isinstance(cache_payload, dict):
+                self._discard_cache_info(cache_payload)
+        if pending and pending.get("kind") == "retry_replay":
+            self._clear_last_failed_recording()
 
     def _translation_default_prompt(self) -> str:
         source = (self._translation_source_language or "").strip() or "自动检测"
@@ -2301,6 +2641,39 @@ class AsrController(QtCore.QObject):
     def translationToggleHotkeyEnabled(self, value: bool) -> None:
         self._update_keyboard_hotkey("translation_toggle", enabled=bool(value))
 
+    @QtCore.pyqtProperty(str, notify=debugPasteHotkeyTextChanged)
+    def debugPasteHotkeyText(self) -> str:  # noqa: N802
+        return self._debug_paste_hotkey_text
+
+    @debugPasteHotkeyText.setter
+    def debugPasteHotkeyText(self, value: str) -> None:
+        keys = self._parse_keys_text(value)
+        self._update_keyboard_hotkey("debug_paste", keys=keys)
+
+    @QtCore.pyqtProperty(bool, notify=debugPasteHotkeyEnabledChanged)
+    def debugPasteHotkeyEnabled(self) -> bool:  # noqa: N802
+        return self._debug_paste_hotkey_enabled
+
+    @debugPasteHotkeyEnabled.setter
+    def debugPasteHotkeyEnabled(self, value: bool) -> None:
+        self._update_keyboard_hotkey("debug_paste", enabled=bool(value))
+
+    @QtCore.pyqtProperty(str, notify=retryFailedRecordingHotkeyTextChanged)
+    def retryFailedRecordingHotkeyText(self) -> str:  # noqa: N802
+        return self._retry_failed_recording_hotkey_text
+
+    @retryFailedRecordingHotkeyText.setter
+    def retryFailedRecordingHotkeyText(self, value: str) -> None:
+        del value
+
+    @QtCore.pyqtProperty(bool, notify=retryFailedRecordingHotkeyEnabledChanged)
+    def retryFailedRecordingHotkeyEnabled(self) -> bool:  # noqa: N802
+        return self._retry_failed_recording_hotkey_enabled
+
+    @retryFailedRecordingHotkeyEnabled.setter
+    def retryFailedRecordingHotkeyEnabled(self, value: bool) -> None:
+        del value
+
     @QtCore.pyqtProperty(str, notify=mouseHotkeyModeChanged)
     def mouseHotkeyMode(self) -> str:  # noqa: N802
         return self._mouse_hotkey_mode
@@ -2366,7 +2739,7 @@ class AsrController(QtCore.QObject):
 
     @QtCore.pyqtSlot(str)
     def startHotkeyCapture(self, target: str) -> None:
-        if target not in ("primary", "freehand", "translation_toggle"):
+        if target not in ("primary", "freehand", "translation_toggle", "debug_paste"):
             return
         if self._capture_target:
             self._capture_target = None
@@ -2381,6 +2754,73 @@ class AsrController(QtCore.QObject):
         self._capture_target = None
         self._resume_hotkeys()
 
+    def _build_recognition_headers(self) -> Tuple[dict, List[str]]:
+        headers = {
+            "X-Api-App-Key": self._app_id.strip(),
+            "X-Api-Access-Key": self._access_token.strip(),
+            "X-Api-Resource-Id": self.RESOURCE_ID_DEFAULT,
+            "X-Api-Connect-Id": self._connect_id,
+        }
+        missing = [k for k, v in headers.items() if not v and k not in ("X-Api-Connect-Id",)]
+        return headers, missing
+
+    @QtCore.pyqtSlot()
+    def retryLastFailedRecording(self) -> None:  # noqa: N802
+        if not self._retry_prompt_active:
+            return
+        self._dismiss_retry_prompt()
+        if (
+            self._sending
+            or self._connecting
+            or self._pending_close_after_last
+            or self._stop_pending_after_connect
+            or self._pending_close_timer.isActive()
+            or self._translation_in_progress()
+        ):
+            self._show_retry_unavailable_toast("当前正在处理，稍后再试")
+            return
+        payload = self._last_failed_recording
+        if not payload:
+            self._show_retry_unavailable_toast("没有可重试的失败录音")
+            return
+        audio_path = str(payload.get("path", "")).strip()
+        if not audio_path or not os.path.isfile(audio_path):
+            self._clear_last_failed_recording(delete_audio=False)
+            self._show_retry_unavailable_toast("缓存录音已失效，无法重试")
+            return
+        headers, missing = self._build_recognition_headers()
+        if missing:
+            missing_text = "\n".join(missing)
+            self._show_message_box_once(
+                f"retry:missing-auth:{missing_text}",
+                QtWidgets.QMessageBox.Icon.Warning,
+                "提示",
+                "缺少鉴权字段：\n" + missing_text,
+            )
+            return
+
+        session_mode = str(payload.get("session_mode", "hold") or "hold")
+        if session_mode not in ("hold", "toggle"):
+            session_mode = "hold"
+        self._retry_replay_active = True
+        self._retry_replay_failed_path = audio_path
+        self._retry_replay_session_mode = session_mode
+        self._indicator_mode = session_mode
+        self._session_mode = session_mode
+        self._begin_new_session()
+        self._connect_id = str(uuid.uuid4())
+        headers["X-Api-Connect-Id"] = self._connect_id
+        self._recording_before_connected = False
+        self._stop_pending_after_connect = False
+        self._pre_connect_buffer.clear()
+        self._store_pending_connection(self._mode_to_url(), headers)
+        self._connecting = True
+        self.isConnectingChanged.emit()
+        self._update_status_text()
+        if self.recording_indicator:
+            self.recording_indicator.show_processing()
+        self._connect_pending_session()
+
     @QtCore.pyqtSlot()
     def toggleRecognition(self) -> None:
         if self._connecting or self._sending:
@@ -2391,6 +2831,7 @@ class AsrController(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def start_recognition(self, indicator_mode: Optional[str] = None) -> None:
+        self._dismiss_retry_prompt()
         if (
             self._sending
             or self._connecting
@@ -2420,13 +2861,7 @@ class AsrController(QtCore.QObject):
         self._session_mode = self._indicator_mode
 
         if not self._connected:
-            headers = {
-                "X-Api-App-Key": self._app_id.strip(),
-                "X-Api-Access-Key": self._access_token.strip(),
-                "X-Api-Resource-Id": self.RESOURCE_ID_DEFAULT,
-                "X-Api-Connect-Id": self._connect_id,
-            }
-            missing = [k for k, v in headers.items() if not v and k not in ("X-Api-Connect-Id",)]
+            headers, missing = self._build_recognition_headers()
             if missing:
                 self._reset_hotkey_state()
                 missing_text = "\n".join(missing)
@@ -2707,14 +3142,20 @@ class AsrController(QtCore.QObject):
         self._translation_pending_count = max(0, self._translation_pending_count - 1)
         final_text = translated_text.strip() if translated_text else ""
         if error or not final_text:
+            failure_message = error or "翻译结果为空，已回退为原文。"
+            retryable = self._mark_translation_failure_retryable(row, failure_message)
             final_text = source_text.strip()
             error_key = hashlib.sha1((error or "empty").encode("utf-8")).hexdigest()[:12]
             self._show_message_box_once(
                 f"translation:error:{error_key}",
                 QtWidgets.QMessageBox.Icon.Warning,
                 "翻译失败",
-                error or "翻译结果为空，已回退为原文。",
+                failure_message,
             )
+            if retryable:
+                self._show_retry_available_toast("translation")
+        else:
+            self._complete_retry_tracking_success(row)
 
         if row >= 0 and self._history_model.item_at(row) is not None:
             self._history_model.update_item(row, text=final_text, partial=False)
@@ -2773,6 +3214,10 @@ class AsrController(QtCore.QObject):
         try:
             if self._sending:
                 self._stop_mic_no_last()
+        except Exception:
+            pass
+        try:
+            self._close_session_recording_cache()
         except Exception:
             pass
         try:
@@ -2853,12 +3298,15 @@ class AsrController(QtCore.QObject):
             return
 
         config = self.hotkey_manager.get_config()
+        self._apply_derived_retry_hotkey(config)
         hk = config.keyboard_hotkeys.get(hotkey_id)
         if hk is None:
             if hotkey_id == "freehand":
                 hk = HotkeyConfig(enabled=True, keys=["alt", "super"], mode="toggle")
             elif hotkey_id == "translation_toggle":
                 hk = HotkeyConfig(enabled=False, keys=["ctrl", "shift", "t"], mode="toggle")
+            elif hotkey_id == "debug_paste":
+                hk = HotkeyConfig(enabled=False, keys=["ctrl", "shift", "y"], mode="toggle")
             else:
                 hk = HotkeyConfig(enabled=True, keys=["ctrl", "super"], mode="hold")
             config.keyboard_hotkeys[hotkey_id] = hk
@@ -2869,6 +3317,9 @@ class AsrController(QtCore.QObject):
             hk.mode = mode
         if enabled is not None:
             hk.enabled = enabled
+
+        if hotkey_id == "freehand":
+            self._apply_derived_retry_hotkey(config)
 
         self.hotkey_manager.update_config(config)
         ConfigManager.save_config(config)
@@ -2892,9 +3343,12 @@ class AsrController(QtCore.QObject):
         self._sync_hotkey_config(config)
 
     def _sync_hotkey_config(self, config) -> None:
+        self._apply_derived_retry_hotkey(config)
         primary = getattr(config, "keyboard_hotkeys", {}).get("primary") if config else None
         freehand = getattr(config, "keyboard_hotkeys", {}).get("freehand") if config else None
         translation_toggle = getattr(config, "keyboard_hotkeys", {}).get("translation_toggle") if config else None
+        debug_paste = getattr(config, "keyboard_hotkeys", {}).get("debug_paste") if config else None
+        retry_failed_recording = getattr(config, "keyboard_hotkeys", {}).get("retry_failed_recording") if config else None
         mouse = getattr(config, "mouse_hotkeys", {}).get("middle_button") if config else None
 
         self._set_if_changed(
@@ -2930,6 +3384,26 @@ class AsrController(QtCore.QObject):
             "_translation_toggle_hotkey_text",
             self._format_keys_edit(translation_toggle.keys) if translation_toggle else "",
             self.translationToggleHotkeyTextChanged,
+        )
+        self._set_if_changed(
+            "_debug_paste_hotkey_enabled",
+            bool(debug_paste.enabled) if debug_paste else False,
+            self.debugPasteHotkeyEnabledChanged,
+        )
+        self._set_if_changed(
+            "_debug_paste_hotkey_text",
+            self._format_keys_edit(debug_paste.keys) if debug_paste else "",
+            self.debugPasteHotkeyTextChanged,
+        )
+        self._set_if_changed(
+            "_retry_failed_recording_hotkey_enabled",
+            bool(retry_failed_recording.enabled) if retry_failed_recording else False,
+            self.retryFailedRecordingHotkeyEnabledChanged,
+        )
+        self._set_if_changed(
+            "_retry_failed_recording_hotkey_text",
+            self._format_keys_edit(retry_failed_recording.keys) if retry_failed_recording else "",
+            self.retryFailedRecordingHotkeyTextChanged,
         )
 
         self._set_if_changed(
@@ -3060,6 +3534,8 @@ class AsrController(QtCore.QObject):
                     self._update_keyboard_hotkey("freehand", keys=keys)
                 elif self._capture_target == "translation_toggle":
                     self._update_keyboard_hotkey("translation_toggle", keys=keys)
+                elif self._capture_target == "debug_paste":
+                    self._update_keyboard_hotkey("debug_paste", keys=keys)
                 self.hotkeyCaptured.emit(self._capture_target, self._format_keys_edit(keys))
             self._capture_target = None
             self._resume_hotkeys()
@@ -3157,6 +3633,8 @@ class AsrController(QtCore.QObject):
     def _update_status_text(self) -> None:
         if self._connecting:
             text = "连接中…"
+        elif self._retry_replay_active:
+            text = "重试中（缓存录音）"
         elif self._sending:
             text = "识别中（麦克风）"
         elif self._connected:
@@ -3409,6 +3887,8 @@ class AsrController(QtCore.QObject):
             self._session_mode = self._indicator_mode
         else:
             self._session_mode = self._primary_hotkey_mode
+        if not self._retry_replay_active:
+            self._begin_session_recording_cache()
         self._stats_last_speed = 0
         self._audio_sent = False  # 重置音频发送标志
         self._current_row = self._history_model.add_item(self._now_label(), "", True)
@@ -3437,12 +3917,14 @@ class AsrController(QtCore.QObject):
         self._session_elapsed_s = 0.0
         if self._stats_timer.isActive():
             self._stats_timer.stop()
+        self._discard_session_recording_cache()
 
     def _finalize_session(self, cancelled: bool = False) -> None:
         self._session_partial = ""
         if self._current_row is None:
             return
         row = self._current_row
+        session_mode = self._session_mode or "hold"
         content = self._current_session_text(include_partial=False)
         session_elapsed = self._current_session_elapsed()
         session_chars = sum(1 for c in content if not c.isspace())
@@ -3456,6 +3938,10 @@ class AsrController(QtCore.QObject):
             self._stats_total_chars += session_chars
             self._save_stats()
         if not content:
+            if self._retry_replay_active:
+                self._refresh_existing_failed_recording("recognition", "识别结果为空")
+            else:
+                self._discard_session_recording_cache()
             self._history_model.remove_row(row)
             self._emit_history_removed(row)
         else:
@@ -3467,12 +3953,26 @@ class AsrController(QtCore.QObject):
             self._emit_history_row(row)
             if not cancelled:
                 if should_translate:
+                    if self._retry_replay_active:
+                        self._store_pending_translation_recording(row, {"kind": "retry_replay"})
+                    else:
+                        cache_payload = self._take_session_recording_cache()
+                        if cache_payload:
+                            cache_payload["session_mode"] = session_mode
+                            self._store_pending_translation_recording(
+                                row,
+                                {"kind": "session_cache", "cache": cache_payload},
+                            )
                     should_auto_submit = self._auto_submit and not self._user_cancelled and bool(content)
                     self._set_translation_models_status("正在翻译最新识别结果...")
                     if self.recording_indicator:
                         self.recording_indicator.show_translating()
                     self._start_translation_task(row, content, should_auto_submit)
                 else:
+                    if self._retry_replay_active:
+                        self._clear_last_failed_recording()
+                    else:
+                        self._discard_session_recording_cache()
                     clipboard = QtWidgets.QApplication.clipboard()
                     clipboard.setText(content)
                     if (
@@ -3488,6 +3988,11 @@ class AsrController(QtCore.QObject):
                             self._user_cancelled,
                         )
                         self._auto_submit_text(content, immediate=False)
+            else:
+                if self._retry_replay_active:
+                    self._refresh_existing_failed_recording("recognition", "识别已取消")
+                else:
+                    self._discard_session_recording_cache()
         self._current_row = None
         self._stats_timer.stop()
         self._committed_text = ""
@@ -3495,6 +4000,9 @@ class AsrController(QtCore.QObject):
         self._session_elapsed_s = 0.0
         self._session_started_at = None
         self._stop_escape_listener()
+        self._retry_replay_active = False
+        self._retry_replay_failed_path = None
+        self._retry_replay_session_mode = "hold"
         self._update_stats()
         if not self._translation_in_progress():
             self._hide_indicator()
@@ -3668,6 +4176,31 @@ class AsrController(QtCore.QObject):
         frame = build_full_client_request(payload, use_gzip=self._use_gzip)
         self.ws.send_binary(frame)
         self._log("SEND", f"request ({len(frame)} bytes)")
+
+    def _send_retry_recording_from_file(self, audio_path: str) -> bool:
+        if not audio_path or not os.path.isfile(audio_path):
+            return False
+        try:
+            chunk_bytes = self._chunk_bytes()
+            total = 0
+            with open(audio_path, "rb") as fh:
+                while True:
+                    chunk = fh.read(chunk_bytes)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    frame = build_audio_only_request(chunk, last=False, use_gzip=self._use_gzip)
+                    self.ws.send_binary(frame)
+                    self._audio_sent = True
+            frame = build_audio_only_request(b"", last=True, use_gzip=self._use_gzip)
+            self.ws.send_binary(frame)
+            self._pending_close_after_last = True
+            self._pending_close_timer.start(1500)
+            self._log("RETRY", f"重试发送缓存录音: {audio_path} ({total}B)")
+            return True
+        except Exception as exc:
+            self._log("RETRY", f"重试发送缓存录音失败: {exc}")
+            return False
 
     def _chunk_bytes(self) -> int:
         samples = int(round(16000 * (self.CHUNK_MS_DEFAULT / 1000.0)))
@@ -3923,6 +4456,7 @@ class AsrController(QtCore.QObject):
             pass
         self._sd_stream = None
         self._use_sounddevice = False
+        self._close_session_recording_cache()
         self._mic_buffer.clear()
         if self._sending:
             self._sending = False
@@ -4522,6 +5056,7 @@ class AsrController(QtCore.QObject):
         # 3. 现在收集所有 buffer 中的数据
         remainder = bytes(self._mic_buffer) if self._mic_buffer else b""
         self._mic_buffer.clear()
+        self._close_session_recording_cache()
 
         # 4. 设置 _sending = False
         if self._sending:
@@ -4565,6 +5100,7 @@ class AsrController(QtCore.QObject):
         )
         if not pcm16k:
             return
+        self._append_session_recording_cache(pcm16k)
 
         # 如果还没连接，缓存到预连接缓冲区
         if not self._connected and self._recording_before_connected:
@@ -4588,6 +5124,7 @@ class AsrController(QtCore.QObject):
             return
         if not raw:
             return
+        self._append_session_recording_cache(raw)
 
         # 如果还没连接，缓存到预连接缓冲区
         if not self._connected and self._recording_before_connected:
@@ -4611,6 +5148,16 @@ class AsrController(QtCore.QObject):
         self.isConnectingChanged.emit()
         self._update_status_text()
         self._send_default_request()
+
+        if self._retry_replay_active:
+            audio_path = self._retry_replay_failed_path or ""
+            if self.recording_indicator:
+                self.recording_indicator.show_processing()
+            if not self._send_retry_recording_from_file(audio_path):
+                self._show_retry_unavailable_toast("缓存录音读取失败，无法重试")
+                self._clear_last_failed_recording(delete_audio=False)
+                self._force_close()
+            return
 
         # 如果是预录音模式，发送缓存的音频数据
         if self._pre_connect_buffer:
@@ -4664,10 +5211,14 @@ class AsrController(QtCore.QObject):
         self._pending_close_timer.stop()
         self._update_status_text()
         self._finalize_session(cancelled=False)
+        self._retry_replay_active = False
+        self._retry_replay_failed_path = None
+        self._retry_replay_session_mode = "hold"
         if not self._translation_in_progress():
             self._hide_indicator()
 
     def _on_ws_error(self, msg: str) -> None:
+        retryable = self._mark_recognition_failure_retryable(msg)
         self._force_close()
         self._show_message_box_once(
             f"ws:error:{msg}",
@@ -4675,6 +5226,8 @@ class AsrController(QtCore.QObject):
             "连接错误",
             msg,
         )
+        if retryable:
+            self._show_retry_available_toast("recognition")
 
     def _on_hotkey_error(self, error_msg: str) -> None:
         self._show_message_box_once(
@@ -4698,6 +5251,128 @@ class AsrController(QtCore.QObject):
         """粘贴文本片段"""
         self._send_paste_key()
 
+    def _build_debug_paste_payload(self, run_id: int, step: int, total: int) -> str:
+        now_text = QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
+        token = uuid.uuid4().hex[:8].upper()
+        return (
+            f"[JT_DEBUG_PASTE run={run_id} step={step}/{total} "
+            f"ts={now_text} token={token}]"
+        )
+
+    def _append_debug_history_item(self, title: str, lines: List[str]) -> None:
+        body = "\n".join(line for line in lines if line)
+        if not body:
+            return
+        row = self._history_model.add_item(self._now_label(), f"{title}\n{body}", False)
+        self._emit_history_insert(row)
+
+    def _debug_set_clipboard(self, label: str, text: str) -> None:
+        clipboard = QtWidgets.QApplication.clipboard()
+        LOG.info("DEBUG_REPRO clipboard_set label=%s len=%d text=%r", label, len(text), text[:160])
+        clipboard.setText(text)
+        QtWidgets.QApplication.processEvents()
+
+    def _run_full_chain_debug_repro(
+        self,
+        run_id: int,
+        primary_text: str,
+        secondary_text: str,
+    ) -> None:
+        self._debug_paste_in_progress = True
+        LOG.info("DEBUG_REPRO start run=%d", run_id)
+
+        def step1() -> None:
+            self._debug_set_clipboard("finalize.primary", primary_text)
+            LOG.info("DEBUG_REPRO paste label=finalize.primary run=%d", run_id)
+            self._send_paste(primary_text)
+
+        def step2() -> None:
+            self._debug_set_clipboard("translation.secondary", secondary_text)
+            LOG.info("DEBUG_REPRO paste label=translation.secondary run=%d", run_id)
+            self._send_paste(secondary_text)
+
+        def step3() -> None:
+            self._debug_set_clipboard("translation.primary_rewrite", primary_text)
+            LOG.info("DEBUG_REPRO paste label=translation.primary_rewrite run=%d", run_id)
+            self._send_paste(primary_text)
+
+        def finish() -> None:
+            LOG.info("DEBUG_REPRO finish run=%d", run_id)
+            self._debug_paste_in_progress = False
+            if self.recording_indicator:
+                self.recording_indicator.show_status_toast(
+                    f"全链路复现完成 #{run_id}",
+                    accent="#dc2626",
+                    duration_ms=1500,
+                )
+
+        QtCore.QTimer.singleShot(0, step1)
+        QtCore.QTimer.singleShot(18, step2)
+        QtCore.QTimer.singleShot(42, step3)
+        QtCore.QTimer.singleShot(110, finish)
+
+    def _run_debug_paste_burst(self, run_id: int, payloads: List[str], index: int = 0) -> None:
+        if index >= len(payloads):
+            self._debug_paste_in_progress = False
+            if self.recording_indicator:
+                self.recording_indicator.show_status_toast(
+                    f"调试粘贴完成 #{run_id}",
+                    accent="#2563eb",
+                    duration_ms=1400,
+                )
+            return
+
+        payload = payloads[index]
+        self._log("DEBUG_PASTE", f"run={run_id} step={index + 1}/{len(payloads)} payload={payload}")
+        self._send_paste(payload)
+
+        if index + 1 < len(payloads):
+            QtCore.QTimer.singleShot(
+                self._debug_paste_interval_ms,
+                lambda rid=run_id, seq=payloads, next_index=index + 1: self._run_debug_paste_burst(rid, seq, next_index),
+            )
+            return
+
+        self._run_debug_paste_burst(run_id, payloads, len(payloads))
+
+    def _on_debug_paste_requested(self) -> None:
+        if not self._is_linux:
+            self._show_message_box_once(
+                "debug-paste:unsupported-platform",
+                QtWidgets.QMessageBox.Icon.Information,
+                "提示",
+                "调试粘贴快捷键目前仅用于 Linux 自动上屏问题复现。",
+            )
+            return
+        if self._debug_paste_in_progress:
+            if self.recording_indicator:
+                self.recording_indicator.show_status_toast(
+                    "调试粘贴仍在进行中",
+                    accent="#f59e0b",
+                    duration_ms=1200,
+                )
+            return
+
+        self._debug_paste_trigger_count += 1
+        run_id = self._debug_paste_trigger_count
+        primary_text = self._build_debug_paste_payload(run_id, 1, 3)
+        secondary_text = self._build_debug_paste_payload(run_id, 2, 3)
+        self._append_debug_history_item(
+            f"全链路复现 #{run_id}，模拟 finalize/translation 双写与双上屏",
+            [
+                f"step1 finalize.primary => {primary_text}",
+                f"step2 translation.secondary => {secondary_text}",
+                f"step3 translation.primary_rewrite => {primary_text}",
+            ],
+        )
+        if self.recording_indicator:
+            self.recording_indicator.show_status_toast(
+                f"全链路复现 #{run_id} 已启动",
+                accent="#dc2626",
+                duration_ms=1800,
+            )
+        self._run_full_chain_debug_repro(run_id, primary_text, secondary_text)
+
     def _on_hotkey_start_recording(self, mode: str) -> None:
         # 热键触发时保存模式用于后续连接成功后显示
         self._indicator_mode = mode if mode in ("hold", "toggle") else self._primary_hotkey_mode
@@ -4713,6 +5388,9 @@ class AsrController(QtCore.QObject):
     def _on_ws_binary(self, data: bytes) -> None:
         parsed = parse_server_message(data)
         if parsed.kind == "error":
+            retryable = self._mark_recognition_failure_retryable(
+                f"{parsed.error_code or ''} {parsed.error_msg or ''}".strip() or "服务端识别失败"
+            )
             self._force_close()
             self._show_message_box_once(
                 f"ws:server-error:{parsed.error_code}:{parsed.error_msg}",
@@ -4720,6 +5398,8 @@ class AsrController(QtCore.QObject):
                 "服务端错误",
                 f"{parsed.error_code}\n{parsed.error_msg}",
             )
+            if retryable:
+                self._show_retry_available_toast("recognition")
             return
         if parsed.kind != "response":
             return
@@ -4935,7 +5615,7 @@ class AsrController(QtCore.QObject):
             pass
 
     def _start_escape_listener(self) -> None:
-        if not self._session_mode or self._session_mode != "toggle":
+        if not self._retry_prompt_active and (not self._session_mode or self._session_mode != "toggle"):
             return
         if self._escape_listener is not None:
             return
@@ -4966,6 +5646,9 @@ class AsrController(QtCore.QObject):
         self._escape_listener = None
 
     def _on_escape_cancel(self) -> None:
+        if self._retry_prompt_active:
+            self._dismiss_retry_prompt()
+            return
         if self._session_mode != "toggle":
             return
         self._user_cancelled = True
