@@ -362,6 +362,27 @@
             background: #e4e4e7;
         }
 
+        .preset-option-main {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .preset-option-desc {
+            display: block;
+            margin-top: 3px;
+            font-size: 11px;
+            font-weight: 400;
+            color: #8a8a93;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         textarea {
             width: 100%;
             min-height: 96px;
@@ -949,21 +970,6 @@
                     </div>
                 </div>
 
-                <div class="form-group" style="background: #f9fafb; padding: 12px; border-radius: var(--radius-md);">
-                    <div class="switch-row" style="margin-bottom: 8px;">
-                        <span style="font-size: 13px; font-weight: 700;">调试粘贴</span>
-                        <label class="switch">
-                            <input id="debug-paste-enabled" type="checkbox">
-                            <span class="slider"><span class="slider-knob"></span></span>
-                        </label>
-                    </div>
-                    <div class="hint-text" style="margin-bottom: 8px;">直接触发当前 Linux 自动上屏链路，不经过录音，可用于复现粘贴卡死问题。</div>
-                    <div class="hotkey-input-group">
-                        <input id="debug-paste-keys" type="text" readonly placeholder="点击录制">
-                        <button class="btn btn-primary capture-btn" data-target="debug_paste" style="padding: 0 12px;">录制</button>
-                    </div>
-                </div>
-
                 <div class="form-group" style="padding: 0 12px;">
                     <div class="switch-row" style="margin-bottom: 8px;">
                         <span style="font-size: 13px; font-weight: 600;">鼠标中键</span>
@@ -1058,6 +1064,11 @@
                     </div>
                 </div>
                 <div class="form-group" style="margin-bottom: 0;">
+                    <label>提示词预设</label>
+                    <div id="translation-prompt-preset-wrap" class="model-select-wrap" style="margin-bottom: 8px;">
+                        <button id="translation-prompt-preset-trigger" class="select-trigger" type="button">手动输入</button>
+                        <div id="translation-prompt-preset-panel" class="model-select-panel"></div>
+                    </div>
                     <label>翻译提示词</label>
                     <div class="hint-text" style="margin-bottom: 6px;">留空则按源语言/目标语言自动生成默认提示词。</div>
                     <textarea id="translation-prompt" placeholder="你是一个专业翻译助手，请保持原意准确、表达自然。"></textarea>
@@ -1072,6 +1083,7 @@
  let controller = null;
  let historyData = [];
  let activeCaptureTarget = null;
+ let shouldOpenTranslationModelsAfterRefresh = false;
  const recognitionLanguageOptions = [
    { value: "zh-CN", label: "中文" },
    { value: "en-US", label: "英语" },
@@ -1088,6 +1100,7 @@
    { value: "ar-SA", label: "阿拉伯语" }
  ];
  const translationTargetLanguageOptions = [
+   { value: "不翻译", label: "不翻译" },
    { value: "英文", label: "英文" },
    { value: "中文", label: "中文" },
    { value: "日文", label: "日文" },
@@ -1102,7 +1115,7 @@
 
  function $(id) { return document.getElementById(id); }
 
- function renderStaticSelect(wrapId, triggerId, panelId, options, currentValue, onSelect) {
+  function renderStaticSelect(wrapId, triggerId, panelId, options, currentValue, onSelect) {
    const wrap = $(wrapId);
    const trigger = $(triggerId);
    const panel = $(panelId);
@@ -1126,8 +1139,58 @@
      });
      panel.appendChild(option);
    });
-   trigger.textContent = matchedLabel || (options[0] ? options[0].label : "");
- }
+    trigger.textContent = matchedLabel || (options[0] ? options[0].label : "");
+  }
+
+  function renderTranslationPromptPresets() {
+    const options = [{ value: "", label: "手动输入" }];
+    let presets = [];
+    try {
+      presets = JSON.parse((controller && controller.translationPromptPresetsJson) || "[]");
+    } catch (err) {
+      presets = [];
+    }
+    presets.forEach((item) => {
+      options.push({
+        value: item.id || "",
+        label: item.label || item.id || "",
+        description: item.description || "",
+      });
+    });
+    const wrap = $("translation-prompt-preset-wrap");
+    const trigger = $("translation-prompt-preset-trigger");
+    const panel = $("translation-prompt-preset-panel");
+    if (!wrap || !trigger || !panel) return;
+    panel.innerHTML = "";
+    const currentValue = (controller && controller.translationPromptPreset) || "";
+    let matchedLabel = "";
+    options.forEach((item) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "model-select-option";
+      option.dataset.value = item.value;
+      if (item.value === currentValue) {
+        option.classList.add("active");
+        matchedLabel = item.label;
+      }
+      const main = document.createElement("span");
+      main.className = "preset-option-main";
+      main.textContent = item.label;
+      option.appendChild(main);
+      if (item.description) {
+        const desc = document.createElement("span");
+        desc.className = "preset-option-desc";
+        desc.textContent = item.description;
+        option.appendChild(desc);
+      }
+      option.addEventListener("click", () => {
+        wrap.classList.remove("open");
+        controller && (controller.translationPromptPreset = item.value);
+      });
+      panel.appendChild(option);
+    });
+    trigger.textContent = matchedLabel || "手动输入";
+  }
 
  // UI 更新函数
  function updateStatus() {
@@ -1162,14 +1225,12 @@
      models = [];
    }
    const currentValue = (controller && controller.translationModel) || "";
-   const statusText = (controller && controller.translationModelsStatus) || "";
-   const hasRequested = !!models.length || (statusText && statusText !== "未获取模型列表");
    panel.innerHTML = "";
-   trigger.disabled = !!(controller && controller.translationModelsLoading);
+   trigger.disabled = false;
    if (!models.length) {
-     trigger.textContent = (controller && controller.translationModelsLoading)
+     trigger.textContent = currentValue || ((controller && controller.translationModelsLoading)
        ? "获取中..."
-       : "请点击获取";
+       : "请点击获取");
    } else {
      let matched = null;
      models.forEach((item) => {
@@ -1207,7 +1268,15 @@
      }
      trigger.textContent = matched || currentValue || models[0].id || "选择翻译模型";
    }
-   wrap.dataset.requested = hasRequested ? "1" : "0";
+   if (
+     shouldOpenTranslationModelsAfterRefresh &&
+     controller &&
+     !controller.translationModelsLoading &&
+     models.length
+   ) {
+     wrap.classList.add("open");
+     shouldOpenTranslationModelsAfterRefresh = false;
+   }
  }
 
  function updateForms() {
@@ -1227,15 +1296,16 @@
    $("translation-base-url").value = controller.translationBaseUrl || "";
    $("translation-api-key").value = controller.translationApiKey || "";
    $("translation-source-language").value = "自动检测";
-   renderStaticSelect(
-     "translation-target-language-wrap",
-     "translation-target-language-trigger",
-     "translation-target-language-panel",
+    renderStaticSelect(
+      "translation-target-language-wrap",
+      "translation-target-language-trigger",
+      "translation-target-language-panel",
      translationTargetLanguageOptions,
-     controller.translationTargetLanguage || "英文",
-     (value) => controller && (controller.translationTargetLanguage = value)
-   );
-   $("translation-prompt").value = controller.translationPrompt || "";
+      controller.translationTargetLanguage || "英文",
+      (value) => controller && (controller.translationTargetLanguage = value)
+    );
+    renderTranslationPromptPresets();
+    $("translation-prompt").value = controller.translationPrompt || "";
    renderTranslationModels();
    $("start-minimized").checked = !!controller.startMinimized;
    $("auto-submit").checked = !!controller.autoSubmit;
@@ -1274,9 +1344,6 @@
 
    $("translation-toggle-keys").value = controller.translationToggleHotkeyText || "";
    $("translation-toggle-enabled").checked = !!controller.translationToggleHotkeyEnabled;
-
-   $("debug-paste-keys").value = controller.debugPasteHotkeyText || "";
-   $("debug-paste-enabled").checked = !!controller.debugPasteHotkeyEnabled;
 
    // 鼠标中键
    $("mouse-enabled").checked = !!controller.mouseModeEnabled;
@@ -1424,21 +1491,21 @@
      e.stopPropagation();
      const wrap = $("translation-model-wrap");
      if (!wrap) return;
-     if (controller && !controller.translationModelsLoading) {
-       let models = [];
-       try {
-         models = JSON.parse(controller.translationModelsJson || "[]");
-       } catch (err) {
-         models = [];
-       }
-       const hasRequested = wrap.dataset.requested === "1";
-       controller.refreshTranslationModels();
-       if (hasRequested && models.length) {
-         wrap.classList.toggle("open");
-         return;
-       }
+     let models = [];
+     try {
+       models = JSON.parse((controller && controller.translationModelsJson) || "[]");
+     } catch (err) {
+       models = [];
      }
-     wrap.classList.remove("open");
+     if (controller && !controller.translationModelsLoading) {
+       shouldOpenTranslationModelsAfterRefresh = true;
+       controller.refreshTranslationModels();
+     }
+     if (models.length) {
+       wrap.classList.toggle("open");
+     } else {
+       wrap.classList.remove("open");
+     }
    });
    $("recognition-language-trigger").addEventListener("click", (e) => {
      e.stopPropagation();
@@ -1448,6 +1515,11 @@
    $("translation-target-language-trigger").addEventListener("click", (e) => {
      e.stopPropagation();
      const wrap = $("translation-target-language-wrap");
+     if (wrap) wrap.classList.toggle("open");
+   });
+   $("translation-prompt-preset-trigger").addEventListener("click", (e) => {
+     e.stopPropagation();
+     const wrap = $("translation-prompt-preset-wrap");
      if (wrap) wrap.classList.toggle("open");
    });
    $("start-minimized").addEventListener("change", (e) => controller && (controller.startMinimized = e.target.checked));
@@ -1495,7 +1567,6 @@
    $("primary-enabled").addEventListener("change", (e) => controller && (controller.primaryHotkeyEnabled = e.target.checked));
    $("freehand-enabled").addEventListener("change", (e) => controller && (controller.freehandHotkeyEnabled = e.target.checked));
    $("translation-toggle-enabled").addEventListener("change", (e) => controller && (controller.translationToggleHotkeyEnabled = e.target.checked));
-   $("debug-paste-enabled").addEventListener("change", (e) => controller && (controller.debugPasteHotkeyEnabled = e.target.checked));
    $("mouse-enabled").addEventListener("change", (e) => controller && (controller.mouseModeEnabled = e.target.checked));
 
    // 鼠标中键模式切换
@@ -1542,14 +1613,21 @@
          recognitionWrap.classList.remove("open");
        }
      }
-     const targetLangWrap = $("translation-target-language-wrap");
-     const targetLangTrigger = $("translation-target-language-trigger");
-     if (targetLangWrap && targetLangWrap.classList.contains("open")) {
-       if (!targetLangWrap.contains(e.target) && e.target !== targetLangTrigger) {
-         targetLangWrap.classList.remove("open");
-       }
-     }
-     if (!activeCaptureTarget) return;
+      const targetLangWrap = $("translation-target-language-wrap");
+      const targetLangTrigger = $("translation-target-language-trigger");
+      if (targetLangWrap && targetLangWrap.classList.contains("open")) {
+        if (!targetLangWrap.contains(e.target) && e.target !== targetLangTrigger) {
+          targetLangWrap.classList.remove("open");
+        }
+      }
+      const presetWrap = $("translation-prompt-preset-wrap");
+      const presetTrigger = $("translation-prompt-preset-trigger");
+      if (presetWrap && presetWrap.classList.contains("open")) {
+        if (!presetWrap.contains(e.target) && e.target !== presetTrigger) {
+          presetWrap.classList.remove("open");
+        }
+      }
+      if (!activeCaptureTarget) return;
      if (e.target.closest(".capture-btn")) return;
      cancelCapture();
    });
@@ -1695,13 +1773,13 @@
      'translationEnabledChanged', 'translationBaseUrlChanged', 'translationApiKeyChanged',
      'translationModelChanged', 'translationPromptChanged', 'translationSourceLanguageChanged',
      'translationTargetLanguageChanged', 'translationModelsChanged', 'translationModelsLoadingChanged',
+     'translationPromptPresetsChanged', 'translationPromptPresetChanged',
      'translationModelsStatusChanged',
      'startMinimizedChanged', 'autoSubmitChanged', 'autoSubmitModeChanged',
      'enablePuncChanged', 'enableDdcChanged', 'enableDelayedStopChanged', 'hotwordsChanged',
      'primaryHotkeyTextChanged', 'primaryHotkeyEnabledChanged',
      'freehandHotkeyTextChanged', 'freehandHotkeyEnabledChanged',
      'translationToggleHotkeyTextChanged', 'translationToggleHotkeyEnabledChanged',
-     'debugPasteHotkeyTextChanged', 'debugPasteHotkeyEnabledChanged',
      'mouseHotkeyModeChanged', 'mouseModeEnabledChanged'
    ];
 

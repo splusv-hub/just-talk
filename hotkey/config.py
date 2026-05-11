@@ -84,9 +84,6 @@ class GlobalHotkeySettings:
                 "translation_toggle": HotkeyConfig(
                     enabled=False, keys=["ctrl", "shift", "t"], mode="toggle"
                 ),
-                "debug_paste": HotkeyConfig(
-                    enabled=False, keys=["ctrl", "shift", "y"], mode="toggle"
-                ),
             },
             mouse_hotkeys={
                 "middle_button": MouseButtonConfig(

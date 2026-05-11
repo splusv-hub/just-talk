@@ -11,3 +11,4 @@ release/
 /aur/pkg/
 /aur/src/
 AppDir/
+.omx/

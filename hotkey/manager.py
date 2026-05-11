@@ -24,7 +24,6 @@ class HotkeyManager(QObject):
     stop_recording_requested = pyqtSignal()
     snippet_triggered = pyqtSignal(str, str)  # (snippet_id, text)
     translation_toggle_requested = pyqtSignal()
-    debug_paste_requested = pyqtSignal()
     retry_failed_recording_requested = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
@@ -125,9 +124,6 @@ class HotkeyManager(QObject):
             return
         if hotkey_id == "translation_toggle" and action == "toggle":
             self.translation_toggle_requested.emit()
-            return
-        if hotkey_id == "debug_paste" and action == "toggle":
-            self.debug_paste_requested.emit()
             return
         if hotkey_id == "retry_failed_recording" and action == "toggle":
             self.retry_failed_recording_requested.emit()
