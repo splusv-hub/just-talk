@@ -43,7 +43,10 @@ fi
 echo "Version: ${version}"
 echo "SHA256: ${sha256}"
 
-aur_dir="${repo_root}/../just-talk-aur"
+aur_dir="${AUR_DIR:-${repo_root}/../just-talk-aur}"
+if [ ! -d "$aur_dir" ] && [ -d "${repo_root}/../just-talk-bin" ]; then
+  aur_dir="${repo_root}/../just-talk-bin"
+fi
 
 if [ -f "${aur_dir}/PKGBUILD" ]; then
   echo "Updating ${aur_dir}/PKGBUILD..."

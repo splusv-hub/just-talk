@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.10
+
+发布日期: 2026-05-13
+
+修复内容:
+
+- 修复 Windows GitHub Actions 构建未覆盖 PyPI 源，导致依赖下载命中镜像 403 后发布资产缺失的问题。
+- 优化 Linux release 脚本，支持通过 `AUR_DIR` 指定 AUR 仓库，并兼容本地 `just-talk-bin` 仓库目录。
+
 ## v1.0.9
 
 发布日期: 2026-05-13

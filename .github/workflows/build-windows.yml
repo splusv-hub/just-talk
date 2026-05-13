@@ -17,6 +17,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      UV_INDEX_URL: https://pypi.org/simple
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
