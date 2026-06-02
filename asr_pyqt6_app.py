@@ -2943,6 +2943,8 @@ class AsrController(QtCore.QObject):
     @QtCore.pyqtSlot()
     def start_recognition(self, indicator_mode: Optional[str] = None) -> None:
         self._dismiss_retry_prompt()
+        # 提前释放可能残留的修饰键（hold 模式下 Ctrl+Super 正在按下）
+        self._release_all_modifiers()
         if (
             self._sending
             or self._connecting
@@ -4638,17 +4640,67 @@ class AsrController(QtCore.QObject):
             return False
 
     def _release_all_modifiers(self) -> None:
-        """释放所有修饰键，防止残留 Win/Ctrl/Alt 导致快捷键误触发"""
+        """释放所有修饰键，用 SendInput + 扫描码防止 Win 键快捷键误触发"""
         if not self._is_windows:
             return
         import ctypes
         from ctypes import wintypes
+        import time
+
         user32 = ctypes.windll.user32
+        INPUT_KEYBOARD = 1
         KEYEVENTF_KEYUP = 0x0002
-        modifiers = [0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1, 0x5B, 0x5C]
-        # LCtrl, RCtrl, LAlt, RAlt, LShift, RShift, LWin, RWin
-        for vk in modifiers:
-            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+        KEYEVENTF_SCANCODE = 0x0008
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class INPUT(ctypes.Structure):
+            class _INPUT(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+            _anonymous_ = ("_input",)
+            _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
+
+        # VK, ScanCode pairs for LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin
+        modifiers = [
+            (0xA2, 0x1D),  # LCtrl
+            (0xA3, 0x11D), # RCtrl
+            (0xA4, 0x38),  # LAlt
+            (0xA5, 0x138), # RAlt
+            (0xA0, 0x2A),  # LShift
+            (0xA1, 0x36),  # RShift
+            (0x5B, 0x15B), # LWin
+            (0x5C, 0x15C), # RWin
+        ]
+
+        # 先检查哪些键实际按着
+        pressed = []
+        for vk, scan in modifiers:
+            if user32.GetAsyncKeyState(vk) & 0x8000:
+                pressed.append((vk, scan))
+
+        if not pressed:
+            return
+
+        # 用 SendInput 发送 KEYUP（带扫描码更有保障）
+        inputs = []
+        for vk, scan in pressed:
+            inp = INPUT(type=INPUT_KEYBOARD)
+            inp.ki.wVk = vk
+            inp.ki.wScan = scan
+            inp.ki.dwFlags = KEYEVENTF_KEYUP | KEYEVENTF_SCANCODE
+            inputs.append(inp)
+
+        if inputs:
+            arr = (INPUT * len(inputs))(*inputs)
+            user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
+            time.sleep(0.05)  # 给 Windows 时间处理
 
     def _send_keystrokes_text(self, text: str) -> bool:
         self._release_all_modifiers()
