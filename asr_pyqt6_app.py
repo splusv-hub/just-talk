@@ -1472,7 +1472,7 @@ class AsrController(QtCore.QObject):
         self._last_committed_end_time = -1
         self._last_full_text = ""
         self._user_cancelled = False
-        self._was_chinese_mode = False  # 录音前输入法是否在中文模式
+        self._switched_ime = False  # 是否已切换到英文输入法
         self._session_partial = ""
         self._current_row: Optional[int] = None
         self._history_model = HistoryModel(self)
@@ -4655,17 +4655,17 @@ class AsrController(QtCore.QObject):
                 return True
         return False
 
-    def _send_shift_toggle(self) -> None:
-        """发送一次 Shift 按键（微信输入法等用 Shift 切换中英文）"""
+    def _send_win_space(self) -> None:
+        """发送 Win+Space（系统级切换输入法）"""
         if not self._is_windows:
             return
         import ctypes
         from ctypes import wintypes
         import time
         user32 = ctypes.windll.user32
-        VK_SHIFT = 0x10
         INPUT_KEYBOARD = 1
         KEYEVENTF_KEYUP = 0x0002
+        VK_LWIN, VK_SPACE = 0x5B, 0x20
 
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [
@@ -4679,46 +4679,35 @@ class AsrController(QtCore.QObject):
             _anonymous_ = ("_input",)
             _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
 
-        down = INPUT(type=INPUT_KEYBOARD)
-        down.ki.wVk = VK_SHIFT
-        up = INPUT(type=INPUT_KEYBOARD)
-        up.ki.wVk = VK_SHIFT
-        up.ki.dwFlags = KEYEVENTF_KEYUP
-        arr = (INPUT * 2)(down, up)
-        user32.SendInput(2, arr, ctypes.sizeof(INPUT))
-        time.sleep(0.05)
+        def mk(vk, up=False):
+            inp = INPUT(type=INPUT_KEYBOARD)
+            inp.ki.wVk = vk
+            inp.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
+            return inp
+
+        arr = (INPUT * 4)(
+            mk(VK_LWIN), mk(VK_SPACE), mk(VK_SPACE, True), mk(VK_LWIN, True)
+        )
+        user32.SendInput(4, arr, ctypes.sizeof(INPUT))
+        time.sleep(0.15)
 
     def _switch_ime_to_english(self) -> None:
-        """通过 Shift 键切换到英文模式（兼容微信/搜狗/微软等输入法）"""
+        """检测中文键盘 → 发 Win+Space 切到英文"""
         if not self._is_windows:
             return
         import ctypes
-        imm32 = ctypes.windll.imm32
-        user32 = ctypes.windll.user32
-        # 检测当前是否在中文模式（IME 开启 + 有转换状态）
-        hwnd = user32.GetForegroundWindow()
-        himc = imm32.ImmGetContext(hwnd)
-        self._was_chinese_mode = False
-        if himc:
-            is_open = imm32.ImmGetOpenStatus(himc)
-            conv = ctypes.c_uint32()
-            sent = ctypes.c_uint32()
-            imm32.ImmGetConversionStatus(himc, ctypes.byref(conv), ctypes.byref(sent))
-            imm32.ImmReleaseContext(hwnd, himc)
-            # IME 打开且有转换 → 中文模式，需要切
-            if is_open and conv.value != 0:
-                self._was_chinese_mode = True
-        # 如果在中文模式，发送 Shift 切换到英文
-        if self._was_chinese_mode:
-            self._send_shift_toggle()
+        layout = ctypes.windll.user32.GetKeyboardLayout(0)
+        lang_id = layout & 0xFFFF
+        self._switched_ime = (lang_id in (0x0804, 0x0404, 0x0C04))
+        if self._switched_ime:
+            self._send_win_space()
 
     def _restore_ime(self) -> None:
-        """如果之前切过中英文，再切回去"""
-        if not self._is_windows:
+        """切回中文输入法"""
+        if not self._is_windows or not self._switched_ime:
             return
-        if self._was_chinese_mode:
-            self._send_shift_toggle()
-        self._was_chinese_mode = False
+        self._send_win_space()
+        self._switched_ime = False
 
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
