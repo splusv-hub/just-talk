@@ -2944,8 +2944,6 @@ class AsrController(QtCore.QObject):
     @QtCore.pyqtSlot()
     def start_recognition(self, indicator_mode: Optional[str] = None) -> None:
         self._dismiss_retry_prompt()
-        # 切换到英文输入法，防止中文 IME 拦截上屏文字
-        self._switch_ime_to_english()
         # 提前释放可能残留的修饰键
         self._release_all_modifiers()
         if (
@@ -5577,10 +5575,12 @@ class AsrController(QtCore.QObject):
         if self._pending_close_after_last and parsed.flags == 0b0011:
             session_text = self._current_session_text(include_partial=False)
             if not self._user_cancelled and session_text and not self._should_translate_output():
+                # 松手后切换输入法（此时无物理键冲突）
+                self._switch_ime_to_english()
                 clipboard = QtWidgets.QApplication.clipboard()
                 clipboard.setText(session_text)
                 self._log("INFO", f"已复制到剪贴板: {session_text}")
-            self._restore_ime()
+                self._restore_ime()
             self._force_close()
 
     def _log(self, tag: str, msg: str) -> None:
