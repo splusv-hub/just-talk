@@ -1472,7 +1472,6 @@ class AsrController(QtCore.QObject):
         self._last_committed_end_time = -1
         self._last_full_text = ""
         self._user_cancelled = False
-        self._switched_ime = False  # 是否已切换到英文输入法
         self._session_partial = ""
         self._current_row: Optional[int] = None
         self._history_model = HistoryModel(self)
@@ -2944,7 +2943,7 @@ class AsrController(QtCore.QObject):
     @QtCore.pyqtSlot()
     def start_recognition(self, indicator_mode: Optional[str] = None) -> None:
         self._dismiss_retry_prompt()
-        # 提前释放可能残留的修饰键
+        # 提前释放可能残留的修饰键（hold 模式下 Ctrl+Super 正在按下）
         self._release_all_modifiers()
         if (
             self._sending
@@ -4653,60 +4652,6 @@ class AsrController(QtCore.QObject):
                 return True
         return False
 
-    def _send_win_space(self) -> None:
-        """发送 Win+Space（系统级切换输入法）"""
-        if not self._is_windows:
-            return
-        import ctypes
-        from ctypes import wintypes
-        import time
-        user32 = ctypes.windll.user32
-        INPUT_KEYBOARD = 1
-        KEYEVENTF_KEYUP = 0x0002
-        VK_LWIN, VK_SPACE = 0x5B, 0x20
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-        class INPUT(ctypes.Structure):
-            class _INPUT(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-            _anonymous_ = ("_input",)
-            _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
-
-        def mk(vk, up=False):
-            inp = INPUT(type=INPUT_KEYBOARD)
-            inp.ki.wVk = vk
-            inp.ki.dwFlags = KEYEVENTF_KEYUP if up else 0
-            return inp
-
-        arr = (INPUT * 4)(
-            mk(VK_LWIN), mk(VK_SPACE), mk(VK_SPACE, True), mk(VK_LWIN, True)
-        )
-        user32.SendInput(4, arr, ctypes.sizeof(INPUT))
-        time.sleep(0.15)
-
-    def _switch_ime_to_english(self) -> None:
-        """检测中文键盘 → 发 Win+Space 切到英文"""
-        if not self._is_windows:
-            return
-        import ctypes
-        layout = ctypes.windll.user32.GetKeyboardLayout(0)
-        lang_id = layout & 0xFFFF
-        self._switched_ime = (lang_id in (0x0804, 0x0404, 0x0C04))
-        if self._switched_ime:
-            self._send_win_space()
-
-    def _restore_ime(self) -> None:
-        """切回中文输入法"""
-        if not self._is_windows or not self._switched_ime:
-            return
-        self._send_win_space()
-        self._switched_ime = False
-
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
         if not self._is_windows:
@@ -5575,12 +5520,9 @@ class AsrController(QtCore.QObject):
         if self._pending_close_after_last and parsed.flags == 0b0011:
             session_text = self._current_session_text(include_partial=False)
             if not self._user_cancelled and session_text and not self._should_translate_output():
-                # 松手后切换输入法（此时无物理键冲突）
-                self._switch_ime_to_english()
                 clipboard = QtWidgets.QApplication.clipboard()
                 clipboard.setText(session_text)
                 self._log("INFO", f"已复制到剪贴板: {session_text}")
-                self._restore_ime()
             self._force_close()
 
     def _log(self, tag: str, msg: str) -> None:
