@@ -1472,10 +1472,7 @@ class AsrController(QtCore.QObject):
         self._last_committed_end_time = -1
         self._last_full_text = ""
         self._user_cancelled = False
-        self._saved_ime_layout = 0
-        self._saved_ime_open = None
-        self._saved_ime_conversion = 0
-        self._saved_ime_sentence = 0
+        self._was_chinese_mode = False  # 录音前输入法是否在中文模式
         self._session_partial = ""
         self._current_row: Optional[int] = None
         self._history_model = HistoryModel(self)
@@ -4658,70 +4655,70 @@ class AsrController(QtCore.QObject):
                 return True
         return False
 
-    def _switch_ime_to_english(self) -> None:
-        """保存当前输入法并切换到英文模式"""
+    def _send_shift_toggle(self) -> None:
+        """发送一次 Shift 按键（微信输入法等用 Shift 切换中英文）"""
         if not self._is_windows:
             return
         import ctypes
         from ctypes import wintypes
+        import time
         user32 = ctypes.windll.user32
-        imm32 = ctypes.windll.imm32
+        VK_SHIFT = 0x10
+        INPUT_KEYBOARD = 1
+        KEYEVENTF_KEYUP = 0x0002
 
-        # 1. 保存键盘布局
-        self._saved_ime_layout = user32.GetKeyboardLayout(0)
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+        class INPUT(ctypes.Structure):
+            class _INPUT(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+            _anonymous_ = ("_input",)
+            _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
 
-        # 2. 保存并关闭 IME 中文转换模式
-        hwnd = user32.GetForegroundWindow()
-        himc = imm32.ImmGetContext(hwnd)
-        if himc:
-            self._saved_ime_open = imm32.ImmGetOpenStatus(himc)
-            self._saved_ime_conversion = ctypes.c_uint32()
-            self._saved_ime_sentence = ctypes.c_uint32()
-            imm32.ImmGetConversionStatus(
-                himc,
-                ctypes.byref(self._saved_ime_conversion),
-                ctypes.byref(self._saved_ime_sentence),
-            )
-            # 关闭 IME 并设为英文字母数字模式
-            imm32.ImmSetOpenStatus(himc, False)
-            imm32.ImmSetConversionStatus(himc, 0, 0)
-            imm32.ImmReleaseContext(hwnd, himc)
+        down = INPUT(type=INPUT_KEYBOARD)
+        down.ki.wVk = VK_SHIFT
+        up = INPUT(type=INPUT_KEYBOARD)
+        up.ki.wVk = VK_SHIFT
+        up.ki.dwFlags = KEYEVENTF_KEYUP
+        arr = (INPUT * 2)(down, up)
+        user32.SendInput(2, arr, ctypes.sizeof(INPUT))
+        time.sleep(0.05)
 
-        # 3. 切换到美式英文键盘布局（进程级）
-        KLF_ACTIVATE = 0x00000001
-        KLF_SETFORPROCESS = 0x00000100
-        KLF_SUBSTITUTE_OK = 0x00000002
-        en_layout = user32.LoadKeyboardLayoutW(
-            "00000409", KLF_ACTIVATE | KLF_SETFORPROCESS | KLF_SUBSTITUTE_OK
-        )
-        if en_layout:
-            user32.ActivateKeyboardLayout(en_layout, KLF_SETFORPROCESS)
-
-    def _restore_ime(self) -> None:
-        """恢复录音前保存的输入法"""
-        if not self._is_windows or not self._saved_ime_layout:
+    def _switch_ime_to_english(self) -> None:
+        """通过 Shift 键切换到英文模式（兼容微信/搜狗/微软等输入法）"""
+        if not self._is_windows:
             return
         import ctypes
-        KLF_SETFORPROCESS = 0x00000100
-        ctypes.windll.user32.ActivateKeyboardLayout(self._saved_ime_layout, KLF_SETFORPROCESS)
-        # 恢复 IME 转换模式
-        if hasattr(self, '_saved_ime_open') and self._saved_ime_open is not None:
-            imm32 = ctypes.windll.imm32
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetForegroundWindow()
-            himc = imm32.ImmGetContext(hwnd)
-            if himc:
-                imm32.ImmSetConversionStatus(
-                    himc,
-                    self._saved_ime_conversion,
-                    self._saved_ime_sentence,
-                )
-                imm32.ImmSetOpenStatus(himc, self._saved_ime_open)
-                imm32.ImmReleaseContext(hwnd, himc)
-        self._saved_ime_layout = 0
-        self._saved_ime_open = None
-        self._saved_ime_conversion = 0
-        self._saved_ime_sentence = 0
+        imm32 = ctypes.windll.imm32
+        user32 = ctypes.windll.user32
+        # 检测当前是否在中文模式（IME 开启 + 有转换状态）
+        hwnd = user32.GetForegroundWindow()
+        himc = imm32.ImmGetContext(hwnd)
+        self._was_chinese_mode = False
+        if himc:
+            is_open = imm32.ImmGetOpenStatus(himc)
+            conv = ctypes.c_uint32()
+            sent = ctypes.c_uint32()
+            imm32.ImmGetConversionStatus(himc, ctypes.byref(conv), ctypes.byref(sent))
+            imm32.ImmReleaseContext(hwnd, himc)
+            # IME 打开且有转换 → 中文模式，需要切
+            if is_open and conv.value != 0:
+                self._was_chinese_mode = True
+        # 如果在中文模式，发送 Shift 切换到英文
+        if self._was_chinese_mode:
+            self._send_shift_toggle()
+
+    def _restore_ime(self) -> None:
+        """如果之前切过中英文，再切回去"""
+        if not self._is_windows:
+            return
+        if self._was_chinese_mode:
+            self._send_shift_toggle()
+        self._was_chinese_mode = False
 
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
