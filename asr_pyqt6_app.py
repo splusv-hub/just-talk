@@ -4639,19 +4639,6 @@ class AsrController(QtCore.QObject):
         except Exception:
             return False
 
-    def _are_modifiers_held(self) -> bool:
-        """检查 Win/Ctrl/Alt 是否被物理按住——上屏前安全检查"""
-        if not self._is_windows:
-            return False
-        import ctypes
-        user32 = ctypes.windll.user32
-        critical = [0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5]
-        # LWin, RWin, LCtrl, RCtrl, LAlt, RAlt
-        for vk in critical:
-            if user32.GetAsyncKeyState(vk) & 0x8000:
-                return True
-        return False
-
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
         if not self._is_windows:
@@ -4708,9 +4695,6 @@ class AsrController(QtCore.QObject):
             time.sleep(0.05)
 
     def _send_keystrokes_text(self, text: str) -> bool:
-        if self._are_modifiers_held():
-            self._log("AUTO_SUBMIT", "修饰键按住中，跳过打字上屏")
-            return False
         self._release_all_modifiers()
         if self._is_linux:
             # Wayland 下不支持直接输入上屏，只支持粘贴上屏
