@@ -1472,6 +1472,7 @@ class AsrController(QtCore.QObject):
         self._last_committed_end_time = -1
         self._last_full_text = ""
         self._user_cancelled = False
+        self._saved_ime_layout = 0  # 录音前保存的输入法布局
         self._session_partial = ""
         self._current_row: Optional[int] = None
         self._history_model = HistoryModel(self)
@@ -2943,7 +2944,9 @@ class AsrController(QtCore.QObject):
     @QtCore.pyqtSlot()
     def start_recognition(self, indicator_mode: Optional[str] = None) -> None:
         self._dismiss_retry_prompt()
-        # 提前释放可能残留的修饰键（hold 模式下 Ctrl+Super 正在按下）
+        # 切换到英文输入法，防止中文 IME 拦截上屏文字
+        self._switch_ime_to_english()
+        # 提前释放可能残留的修饰键
         self._release_all_modifiers()
         if (
             self._sending
@@ -4652,6 +4655,26 @@ class AsrController(QtCore.QObject):
                 return True
         return False
 
+    def _switch_ime_to_english(self) -> None:
+        """保存当前输入法并切换到英文，防止中文 IME 拦截上屏文字"""
+        if not self._is_windows:
+            return
+        import ctypes
+        user32 = ctypes.windll.user32
+        self._saved_ime_layout = user32.GetKeyboardLayout(0)
+        # 加载并激活美式英文键盘布局 (0x0409 = en-US)
+        en_layout = user32.LoadKeyboardLayoutW("00000409", 0x00000001)  # KLF_ACTIVATE
+        if en_layout:
+            user32.ActivateKeyboardLayout(en_layout, 0)
+
+    def _restore_ime(self) -> None:
+        """恢复录音前保存的输入法"""
+        if not self._is_windows or not self._saved_ime_layout:
+            return
+        import ctypes
+        ctypes.windll.user32.ActivateKeyboardLayout(self._saved_ime_layout, 0)
+        self._saved_ime_layout = 0
+
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
         if not self._is_windows:
@@ -5523,6 +5546,7 @@ class AsrController(QtCore.QObject):
                 clipboard = QtWidgets.QApplication.clipboard()
                 clipboard.setText(session_text)
                 self._log("INFO", f"已复制到剪贴板: {session_text}")
+            self._restore_ime()
             self._force_close()
 
     def _log(self, tag: str, msg: str) -> None:
