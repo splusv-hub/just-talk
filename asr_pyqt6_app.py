@@ -1472,7 +1472,10 @@ class AsrController(QtCore.QObject):
         self._last_committed_end_time = -1
         self._last_full_text = ""
         self._user_cancelled = False
-        self._saved_ime_layout = 0  # 录音前保存的输入法布局
+        self._saved_ime_layout = 0
+        self._saved_ime_open = None
+        self._saved_ime_conversion = 0
+        self._saved_ime_sentence = 0
         self._session_partial = ""
         self._current_row: Optional[int] = None
         self._history_model = HistoryModel(self)
@@ -4656,24 +4659,69 @@ class AsrController(QtCore.QObject):
         return False
 
     def _switch_ime_to_english(self) -> None:
-        """保存当前输入法并切换到英文，防止中文 IME 拦截上屏文字"""
+        """保存当前输入法并切换到英文模式"""
         if not self._is_windows:
             return
         import ctypes
+        from ctypes import wintypes
         user32 = ctypes.windll.user32
+        imm32 = ctypes.windll.imm32
+
+        # 1. 保存键盘布局
         self._saved_ime_layout = user32.GetKeyboardLayout(0)
-        # 加载并激活美式英文键盘布局 (0x0409 = en-US)
-        en_layout = user32.LoadKeyboardLayoutW("00000409", 0x00000001)  # KLF_ACTIVATE
+
+        # 2. 保存并关闭 IME 中文转换模式
+        hwnd = user32.GetForegroundWindow()
+        himc = imm32.ImmGetContext(hwnd)
+        if himc:
+            self._saved_ime_open = imm32.ImmGetOpenStatus(himc)
+            self._saved_ime_conversion = ctypes.c_uint32()
+            self._saved_ime_sentence = ctypes.c_uint32()
+            imm32.ImmGetConversionStatus(
+                himc,
+                ctypes.byref(self._saved_ime_conversion),
+                ctypes.byref(self._saved_ime_sentence),
+            )
+            # 关闭 IME 并设为英文字母数字模式
+            imm32.ImmSetOpenStatus(himc, False)
+            imm32.ImmSetConversionStatus(himc, 0, 0)
+            imm32.ImmReleaseContext(hwnd, himc)
+
+        # 3. 切换到美式英文键盘布局（进程级）
+        KLF_ACTIVATE = 0x00000001
+        KLF_SETFORPROCESS = 0x00000100
+        KLF_SUBSTITUTE_OK = 0x00000002
+        en_layout = user32.LoadKeyboardLayoutW(
+            "00000409", KLF_ACTIVATE | KLF_SETFORPROCESS | KLF_SUBSTITUTE_OK
+        )
         if en_layout:
-            user32.ActivateKeyboardLayout(en_layout, 0)
+            user32.ActivateKeyboardLayout(en_layout, KLF_SETFORPROCESS)
 
     def _restore_ime(self) -> None:
         """恢复录音前保存的输入法"""
         if not self._is_windows or not self._saved_ime_layout:
             return
         import ctypes
-        ctypes.windll.user32.ActivateKeyboardLayout(self._saved_ime_layout, 0)
+        KLF_SETFORPROCESS = 0x00000100
+        ctypes.windll.user32.ActivateKeyboardLayout(self._saved_ime_layout, KLF_SETFORPROCESS)
+        # 恢复 IME 转换模式
+        if hasattr(self, '_saved_ime_open') and self._saved_ime_open is not None:
+            imm32 = ctypes.windll.imm32
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            himc = imm32.ImmGetContext(hwnd)
+            if himc:
+                imm32.ImmSetConversionStatus(
+                    himc,
+                    self._saved_ime_conversion,
+                    self._saved_ime_sentence,
+                )
+                imm32.ImmSetOpenStatus(himc, self._saved_ime_open)
+                imm32.ImmReleaseContext(hwnd, himc)
         self._saved_ime_layout = 0
+        self._saved_ime_open = None
+        self._saved_ime_conversion = 0
+        self._saved_ime_sentence = 0
 
     def _release_all_modifiers(self) -> None:
         """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
