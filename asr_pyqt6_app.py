@@ -4637,7 +4637,21 @@ class AsrController(QtCore.QObject):
         except Exception:
             return False
 
+    def _release_all_modifiers(self) -> None:
+        """释放所有修饰键，防止残留 Win/Ctrl/Alt 导致快捷键误触发"""
+        if not self._is_windows:
+            return
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        KEYEVENTF_KEYUP = 0x0002
+        modifiers = [0xA2, 0xA3, 0xA4, 0xA5, 0xA0, 0xA1, 0x5B, 0x5C]
+        # LCtrl, RCtrl, LAlt, RAlt, LShift, RShift, LWin, RWin
+        for vk in modifiers:
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
     def _send_keystrokes_text(self, text: str) -> bool:
+        self._release_all_modifiers()
         if self._is_linux:
             # Wayland 下不支持直接输入上屏，只支持粘贴上屏
             if self._is_wayland:
@@ -4668,6 +4682,7 @@ class AsrController(QtCore.QObject):
             return False
 
     def _send_paste(self, text: str) -> None:
+        self._release_all_modifiers()
         clipboard = QtWidgets.QApplication.clipboard()
         clipboard.setText(text)
         # Ensure clipboard data is committed before sending paste
