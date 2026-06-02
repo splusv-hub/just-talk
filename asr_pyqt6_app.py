@@ -5861,7 +5861,29 @@ def _build_tray_icon() -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
+def _ensure_single_instance() -> bool:
+    """单实例：已有进程则激活旧窗口并退出。"""
+    if not sys.platform.startswith("win"):
+        return True
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    handle = kernel32.CreateMutexW(None, True, "JustTalk_SingleInstance_Mutex")
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        hwnd = user32.FindWindowW(None, "说了么")
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+        kernel32.CloseHandle(handle)
+        return False
+    return True
+
+
 def main() -> int:
+    if not _ensure_single_instance():
+        return 0
+
     _setup_frozen_qt_env()
     # 启用 QtWebEngine 远程调试
     os.environ.setdefault("QTWEBENGINE_REMOTE_DEBUGGING", "9223")
