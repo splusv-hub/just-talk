@@ -4639,8 +4639,21 @@ class AsrController(QtCore.QObject):
         except Exception:
             return False
 
+    def _are_modifiers_held(self) -> bool:
+        """检查 Win/Ctrl/Alt 是否被物理按住——上屏前安全检查"""
+        if not self._is_windows:
+            return False
+        import ctypes
+        user32 = ctypes.windll.user32
+        critical = [0x5B, 0x5C, 0xA2, 0xA3, 0xA4, 0xA5]
+        # LWin, RWin, LCtrl, RCtrl, LAlt, RAlt
+        for vk in critical:
+            if user32.GetAsyncKeyState(vk) & 0x8000:
+                return True
+        return False
+
     def _release_all_modifiers(self) -> None:
-        """释放所有修饰键，用 SendInput + 扫描码防止 Win 键快捷键误触发"""
+        """反复释放修饰键直到确认松开，防止 Win 快捷键误触发"""
         if not self._is_windows:
             return
         import ctypes
@@ -4667,42 +4680,37 @@ class AsrController(QtCore.QObject):
             _anonymous_ = ("_input",)
             _fields_ = [("type", wintypes.DWORD), ("_input", _INPUT)]
 
-        # VK, ScanCode pairs for LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin
         modifiers = [
-            (0xA2, 0x1D),  # LCtrl
-            (0xA3, 0x11D), # RCtrl
-            (0xA4, 0x38),  # LAlt
-            (0xA5, 0x138), # RAlt
-            (0xA0, 0x2A),  # LShift
-            (0xA1, 0x36),  # RShift
-            (0x5B, 0x15B), # LWin
-            (0x5C, 0x15C), # RWin
+            (0xA2, 0x1D), (0xA3, 0x11D),  # LCtrl, RCtrl
+            (0xA4, 0x38), (0xA5, 0x138),  # LAlt, RAlt
+            (0xA0, 0x2A), (0xA1, 0x36),   # LShift, RShift
+            (0x5B, 0x15B), (0x5C, 0x15C), # LWin, RWin
         ]
 
-        # 先检查哪些键实际按着
-        pressed = []
-        for vk, scan in modifiers:
-            if user32.GetAsyncKeyState(vk) & 0x8000:
-                pressed.append((vk, scan))
-
-        if not pressed:
-            return
-
-        # 用 SendInput 发送 KEYUP（带扫描码更有保障）
-        inputs = []
-        for vk, scan in pressed:
-            inp = INPUT(type=INPUT_KEYBOARD)
-            inp.ki.wVk = vk
-            inp.ki.wScan = scan
-            inp.ki.dwFlags = KEYEVENTF_KEYUP | KEYEVENTF_SCANCODE
-            inputs.append(inp)
-
-        if inputs:
+        # 最多尝试 10 次，每次间隔 50ms
+        for _ in range(10):
+            pressed = []
+            for vk, scan in modifiers:
+                if user32.GetAsyncKeyState(vk) & 0x8000:
+                    pressed.append((vk, scan))
+            if not pressed:
+                return  # 全部松开，成功
+            # 发送 KEYUP
+            inputs = []
+            for vk, scan in pressed:
+                inp = INPUT(type=INPUT_KEYBOARD)
+                inp.ki.wVk = vk
+                inp.ki.wScan = scan
+                inp.ki.dwFlags = KEYEVENTF_KEYUP | KEYEVENTF_SCANCODE
+                inputs.append(inp)
             arr = (INPUT * len(inputs))(*inputs)
             user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
-            time.sleep(0.05)  # 给 Windows 时间处理
+            time.sleep(0.05)
 
     def _send_keystrokes_text(self, text: str) -> bool:
+        if self._are_modifiers_held():
+            self._log("AUTO_SUBMIT", "修饰键按住中，跳过打字上屏")
+            return False
         self._release_all_modifiers()
         if self._is_linux:
             # Wayland 下不支持直接输入上屏，只支持粘贴上屏
