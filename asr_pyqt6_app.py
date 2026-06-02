@@ -5504,9 +5504,13 @@ class AsrController(QtCore.QObject):
         if self._pending_close_after_last and parsed.flags == 0b0011:
             session_text = self._current_session_text(include_partial=False)
             if not self._user_cancelled and session_text and not self._should_translate_output():
+                self._release_all_modifiers()
                 clipboard = QtWidgets.QApplication.clipboard()
                 clipboard.setText(session_text)
                 self._log("INFO", f"已复制到剪贴板: {session_text}")
+                # 松手后统一上屏（录音中按住键时上屏会触发 Win+快捷键）
+                if self._auto_submit:
+                    QtCore.QTimer.singleShot(100, lambda: self._send_paste(session_text))
             self._force_close()
 
     def _log(self, tag: str, msg: str) -> None:
